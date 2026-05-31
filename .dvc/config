@@ -1,0 +1,4 @@
+[core]
+    remote = mydvcfolder
+['remote "mydvcfolder"']
+    url = ../S3
