@@ -1,0 +1,30 @@
+# Render Backend Deployment Configuration
+# https://render.com/docs/deploy-fastapi
+#
+# How to use:
+# 1. Push your code to a GitHub repository
+# 2. In Render Dashboard, click "New +" → "Blueprint"
+# 3. Connect your GitHub repo
+# 4. Render will auto-detect this render.yaml file
+# 5. Set the GROQ_API_KEY as an environment secret (free at https://console.groq.com)
+
+services:
+  - type: web
+    name: al-ilm-islamic-rag-api
+    env: python
+    plan: free
+    region: oregon
+    buildCommand: bash render-build.sh
+    startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: LLM_PROVIDER
+        value: groq
+      - key: LLM_MODEL
+        value: llama-3.1-8b-instant
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: PYTHONUNBUFFERED
+        value: "1"

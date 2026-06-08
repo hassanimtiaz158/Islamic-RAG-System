@@ -1,0 +1,13 @@
+============================================================
+Step 1: Loading Quran...
+Loaded 6236 ayahs
+============================================================
+Step 2: Indexing Quran...
+Quran indexed!
+============================================================
+Step 3: Loading and indexing Hadith...
+Loading bukhari...
+Loaded 650 hadiths
+bukhari indexed!
+============================================================
+DONE in 449.5s!

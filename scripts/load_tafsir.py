@@ -10,7 +10,7 @@ def load_tafsir_from_json(file_path: str | Path) -> list[Document]:
     Load Tafsir JSON and convert into LangChain Documents.
     """
 
-    file_path = Path(r"D:\islamic-rag-system\data\tafsir\tafsir_ibn_kathir.json")
+    file_path = Path(file_path)
 
     with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -25,7 +25,7 @@ def load_tafsir_from_json(file_path: str | Path) -> list[Document]:
 
         surah = item.get("surah")
         ayah = item.get("ayah")
-        source = item.get("tafsir_source", "Unknown Tafsir")
+        source = item.get("tafsir_source", "Tafsir Ibn Kathir")
         reference = item.get("reference", f"{surah}:{ayah}")
 
         documents.append(

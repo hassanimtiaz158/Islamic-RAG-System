@@ -1,0 +1,11 @@
+# Ignore backend files when deploying frontend to Vercel
+src/
+scripts/
+data/
+*.py
+requirements.txt
+*.yaml
+dockerfile
+.env*
+*.md
+.gitignore

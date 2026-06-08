@@ -7,7 +7,12 @@ EMBED_LOCK = threading.Lock()
 
 import chromadb
 from chromadb.config import Settings
-from langchain_community.embeddings import HuggingFaceEmbeddings
+
+try:
+    from langchain_huggingface import HuggingFaceEmbeddings
+except ImportError:
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+
 from langchain_community.vectorstores import Chroma
 
 
@@ -84,10 +89,10 @@ class IslamicVectorStore:
                 f"[{collection_name}] Indexed "
                 f"{indexed}/{total_docs} documents"
             )
+
     def safe_embed_query(self, text):
         with EMBED_LOCK:
             return self.embeddings.embed_query(text)
-
 
     def get_retriever(self, collection_name: str, k: int = 5):
         """
@@ -107,3 +112,11 @@ class IslamicVectorStore:
         Return all available collections.
         """
         return list(COLLECTIONS.keys())
+
+    def delete_collection(self, collection_name: str) -> None:
+        """Delete a collection and remove from cache."""
+        try:
+            self.client.delete_collection(collection_name)
+        except Exception:
+            pass
+        self._stores.pop(collection_name, None)

@@ -41,6 +41,13 @@ def classifier_node(state: IslamicAgentState, llm) -> Dict[str, Any]:
     and determines which collections to retrieve from.
     """
 
+    # If no LLM available, return safe defaults
+    if llm is None:
+        return {
+            "query_type": "general",
+            "routing": ["quran", "hadith_bukhari"],
+        }
+
     try:
         # Call LLM
         response = llm.invoke(

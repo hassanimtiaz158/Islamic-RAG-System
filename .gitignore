@@ -1,5 +1,45 @@
+# Environment
 .env
+.env.local
 venv/
+.venv/
+
+# Data
 data/
 /data
-S3
+vectorstore/
+vectorstore*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DVC
+.dvc/cache
+.dvc/tmp
+*.dvc
+
+# Logs
+*.log
+
+# Deployment
+node_modules/
+.next/
+
+# Misc
+nul

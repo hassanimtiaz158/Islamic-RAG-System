@@ -1,16 +1,19 @@
-# scripts/test_classifier.py
+# src/agents/test_classifier.py
 
-from classifier import classifier_node
-from state import IslamicAgentState
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.agents.classifier import classifier_node
+from src.agents.state import IslamicAgentState
 
 
 class MockLLM:
-    """
-    Fake LLM for testing without API calls.
-    """
+    """Fake LLM for testing without API calls."""
 
     def invoke(self, prompt: str):
-        # Simulated correct response
         return """
         {
             "sources": ["quran", "hadith_bukhari"],
@@ -24,7 +27,6 @@ def main():
     print("🧪 Testing Islamic Classifier Node")
     print("=" * 60)
 
-    # Sample state
     state: IslamicAgentState = {
         "query": "Is interest in Islam halal or haram?",
         "query_type": "",
@@ -32,29 +34,25 @@ def main():
         "context": "",
         "response": "",
         "citations": [],
+        "citation_cards": [],
         "citation_valid": False,
         "language": "en",
         "iteration": 0,
     }
 
-    # Run classifier with mock LLM
     llm = MockLLM()
-
     result = classifier_node(state, llm)
 
     print("\n🔍 Input Query:")
     print(state["query"])
-
     print("\n📦 Output:")
     print(result)
 
-    # Basic checks
     assert "query_type" in result
     assert "routing" in result
     assert isinstance(result["routing"], list)
 
     print("\n✅ Classifier working correctly!")
-
     print("\n" + "=" * 60)
 
 

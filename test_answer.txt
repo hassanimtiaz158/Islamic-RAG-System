@@ -1,0 +1,23 @@
+=== Answer ===
+Patience (Sabr) is one of the greatest virtues in Islam. Allah says: "O you who have believed, seek help through patience and prayer. Indeed, Allah is with the patient." [Quran Al-Baqarah 2:153]
+
+"And We will surely test you with something of fear and hunger and a loss of wealth and lives and fruits, but give good tidings to the patient." [Quran Al-Baqarah 2:155]
+
+The Prophet ﷺ said: "No one has been given anything better than patience." [Bukhari, Zakat, No. 1469]
+
+=== Citations ===
+  [Quran Al-Baqarah 2:153]
+  [Quran Al-Baqarah 2:155]
+  [Bukhari, Zakat, No. 1469]
+
+=== Sources Used ===
+['quran', 'hadith_bukhari']
+
+=== Health ===
+{
+  "status": "ok",
+  "rag_available": false,
+  "llm_provider": "ollama",
+  "llm_model": "phi3",
+  "version": "1.1.0"
+}

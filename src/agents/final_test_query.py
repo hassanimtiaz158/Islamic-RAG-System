@@ -1,15 +1,15 @@
-# scripts/test_fasting_query.py
+# src/agents/final_test_query.py
 
 import sys
 from pathlib import Path
 
 # Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.islamic_vectorDB import IslamicVectorStore
-from islamic_graph import build_islamic_graph
-from state import IslamicAgentState
+from src.core.islamic_vectorDB import IslamicVectorStore
+from src.agents.islamic_graph import build_islamic_graph
+from src.agents.state import IslamicAgentState
 
 
 def main():
@@ -29,6 +29,7 @@ def main():
         "context": "",
         "response": "",
         "citations": [],
+        "citation_cards": [],
         "citation_valid": False,
         "language": "en",
         "iteration": 0,

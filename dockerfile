@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Set working directory
-WORKDIR /ISLAMIC-RAG-SYSTEM
+WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -33,5 +33,5 @@ COPY . .
 # Expose FastAPI port
 EXPOSE 8000
 
-# Run FastAPI app
-CMD ["python", "scripts/test.py"]
+# Run FastAPI app with uvicorn
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

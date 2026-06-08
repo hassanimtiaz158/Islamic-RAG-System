@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Al-Ilm — Admin Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Amiri:family=Cormorant+Garamond:ital@0,1&family=DM+Mono&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --green-deep: #0d2818; --gold: #c9a84c; --cream: #faf6ef;
+      --ink: #1a1208; --border: rgba(201, 168, 76, 0.25);
+      --radius: 12px; --transition: 0.25s ease;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Cormorant Garamond', serif; background: var(--cream);
+      color: var(--ink); min-height: 100vh; padding: 40px 24px;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 { font-size: 28px; color: var(--green-deep); margin-bottom: 4px; font-weight: 600; }
+    .subtitle { color: #6b5a3e; margin-bottom: 32px; font-style: italic; font-size: 16px; }
+    .card {
+      background: white; border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 24px; margin-bottom: 24px; box-shadow: 0 2px 12px rgba(13,40,24,0.08);
+    }
+    .card h2 { font-size: 18px; color: var(--green-deep); margin-bottom: 16px; font-weight: 500; }
+    .drop-zone {
+      border: 2px dashed var(--border); border-radius: var(--radius); padding: 40px;
+      text-align: center; cursor: pointer; transition: var(--transition);
+      background: rgba(201,168,76,0.04);
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: var(--gold); background: rgba(201,168,76,0.08);
+    }
+    .drop-zone-text { font-size: 18px; color: #6b5a3e; margin-bottom: 8px; }
+    .drop-zone-hint { font-size: 14px; color: #8a7a5e; font-style: italic; }
+    .upload-status { margin-top: 16px; padding: 12px; border-radius: 8px; display: none; }
+    .upload-status.success { display: block; background: #e8f2ec; border: 1px solid #2d7a4f; color: #1e5c38; }
+    .upload-status.error { display: block; background: #fce8e6; border: 1px solid #b43c28; color: #b43c28; }
+    .btn {
+      padding: 10px 24px; border: none; border-radius: 8px; font-family: 'DM Mono', monospace;
+      font-size: 13px; cursor: pointer; transition: var(--transition);
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .btn-primary { background: var(--green-deep); color: var(--gold); }
+    .btn-primary:hover { background: #1a4a2e; }
+    .back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--green-deep); text-decoration: none; font-size: 14px; margin-bottom: 24px; font-family: 'DM Mono', monospace; }
+    .back-link:hover { text-decoration: underline; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    .status-dot.online { background: #3ac77a; }
+    .status-dot.offline { background: #e74c3c; }
+    #collectionStatus { font-family: 'DM Mono', monospace; font-size: 13px; color: #6b5a3e; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a href="/" class="back-link">← Back to Chat</a>
+    <h1>📚 Document Indexing</h1>
+    <p class="subtitle">Upload Islamic texts (PDF/TXT) to expand the knowledge base</p>
+
+    <div class="card">
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-zone-text">Drop your Islamic text file here</div>
+        <div class="drop-zone-hint">or click to browse · Supports .pdf and .txt</div>
+        <input type="file" id="fileInput" accept=".pdf,.txt" style="display:none" />
+      </div>
+      <div class="upload-status" id="uploadStatus"></div>
+    </div>
+
+    <div class="card">
+      <h2>📊 Indexing Status</h2>
+      <div id="collectionStatus">Checking backend connection…</div>
+      <button class="btn btn-primary" onclick="checkHealth()" style="margin-top:12px">⟳ Check Status</button>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = (window.__API_BASE__) || 'http://localhost:8000';
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const status = document.getElementById('uploadStatus');
+    const collectionStatus = document.getElementById('collectionStatus');
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFile(e.dataTransfer.files[0]); });
+    fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+    async function handleFile(file) {
+      status.className = 'upload-status';
+      status.style.display = 'block';
+      status.textContent = `⏳ Indexing "${file.name}"…`;
+      status.style.background = 'rgba(201,168,76,0.1)';
+      status.style.borderColor = 'var(--gold)';
+      status.style.color = '#8a6a1a';
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch(`${API_BASE}/api/index-document`, { method: 'POST', body: formData });
+        const data = await res.json();
+        if (res.ok) {
+          status.className = 'upload-status success';
+          status.textContent = `✅ Indexed ${data.chunks || data.documents} chunks from "${file.name}" into collection "${data.collection}"`;
+        } else {
+          status.className = 'upload-status error';
+          status.textContent = `❌ ${data.detail || 'Upload failed'}`;
+        }
+      } catch (err) {
+        status.className = 'upload-status error';
+        status.textContent = `❌ Backend unreachable: ${err.message}`;
+      }
+    }
+
+    async function checkHealth() {
+      try {
+        const res = await fetch(`${API_BASE}/api/health`);
+        const data = await res.json();
+        const rag = data.rag_available ? '<span class="status-dot online"></span>RAG Available' : '<span class="status-dot offline"></span>RAG Unavailable';
+        collectionStatus.innerHTML = `${rag} · LLM: ${data.llm_provider} (${data.llm_model}) · v${data.version}`;
+      } catch (err) {
+        collectionStatus.innerHTML = '<span class="status-dot offline"></span>Backend offline';
+      }
+    }
+
+    checkHealth();
+  </script>
+</body>
+</html>

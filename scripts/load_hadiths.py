@@ -1,18 +1,62 @@
-# scripts/load_hadith.py
+# scripts/load_hadiths.py
 
+import time
 import requests
 from langchain_core.documents import Document
 
 API_KEY = "$2y$10$EaW8I9L0kEbsv7ubW0tPZIwulE6KhbLMCEHFM4J6tOCp9X6"
 
+# Corrected slugs for HadithAPI.com
 HADITH_COLLECTIONS = {
     "bukhari": "sahih-bukhari",
     "muslim": "sahih-muslim",
-    "abudawud": "abu-dawud",
+    "abudawud": "sunan-abu-dawud",       # Fixed: was "abu-dawud"
     "tirmidhi": "al-tirmidhi",
-    "nasai": "sunan-an-nasai",
+    "nasai": "sunan-nasai",               # Fixed: was "sunan-an-nasai"
     "ibnmajah": "ibn-e-majah",
 }
+
+# Map internal collection key to citation display name
+CITATION_NAMES = {
+    "bukhari": "Bukhari",
+    "muslim": "Muslim",
+    "abudawud": "Abu Dawud",
+    "tirmidhi": "Tirmidhi",
+    "nasai": "Nasai",
+    "ibnmajah": "Ibn Majah",
+}
+
+
+def _fetch_page(url, params, max_retries=3, base_timeout=30):
+    """Fetch a page with retry logic and exponential backoff."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            timeout = base_timeout + (attempt - 1) * 15  # Increase timeout each retry
+            response = requests.get(url, params=params, timeout=timeout)
+            if response.status_code == 429:  # Rate limit
+                wait = attempt * 5
+                print(f"  [RATE LIMIT] Waiting {ss}s before retry {attempt}/{max_retries}...")
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.Timeout:
+            wait = attempt * 3
+            print(f"  [TIMEOUT] Page {params.get('page', '?')} attempt {attempt}/{max_retries} — retrying in {wait}s...")
+            time.sleep(wait)
+        except requests.exceptions.ConnectionError:
+            wait = attempt * 5
+            print(f"  [CONNECTION ERROR] Attempt {attempt}/{max_retries} — retrying in {wait}s...")
+            time.sleep(wait)
+        except requests.exceptions.HTTPError as e:
+            if response.status_code in (500, 502, 503, 504):
+                wait = attempt * 4
+                print(f"  [SERVER ERROR {response.status_code}] Attempt {attempt}/{max_retries} — retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"  [HTTP ERROR] {e}")
+                raise
+    return None  # All retries exhausted
 
 
 def load_hadith_collection(collection_key: str) -> list[Document]:
@@ -36,8 +80,9 @@ def load_hadith_collection(collection_key: str) -> list[Document]:
     base_url = "https://hadithapi.com/api/hadiths"
     documents = []
     page = 1
+    citation_name = CITATION_NAMES.get(collection_key, collection_key.capitalize())
 
-    print(f"Loading {collection_key.title()} hadith collection...\n")
+    print(f"Loading {collection_key.title()} hadith collection (slug: {HADITH_COLLECTIONS[collection_key]})...\n")
 
     while True:
         params = {
@@ -47,17 +92,10 @@ def load_hadith_collection(collection_key: str) -> list[Document]:
             "page": page,
         }
 
-        try:
-            response = requests.get(
-                base_url,
-                params=params,
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
+        data = _fetch_page(base_url, params, max_retries=3)
 
-        except requests.RequestException as e:
-            print(f"Error fetching page {page}: {e}")
+        if data is None:
+            print(f"  [SKIP] Page {page} failed after all retries — stopping.")
             break
 
         hadith_data = data.get("hadiths", {}).get("data", [])
@@ -77,7 +115,7 @@ def load_hadith_collection(collection_key: str) -> list[Document]:
             grade = (hadith.get("status") or "").strip()
             narrator = (hadith.get("headingEnglish") or "").strip()
 
-            citation = f"[{collection_key.capitalize()} {hadith_number}"
+            citation = f"[{citation_name} {hadith_number}"
 
             if grade:
                 citation += f" ({grade})"
@@ -96,7 +134,7 @@ def load_hadith_collection(collection_key: str) -> list[Document]:
                     "narrator": narrator,
                     "citation": citation,
                     "full_ref": (
-                        f"{collection_key.capitalize()} "
+                        f"{citation_name} "
                         f"Hadith {hadith_number}"
                     ),
                 },
