@@ -4,12 +4,16 @@
 ═══════════════════════════════════════════════ */
 
 /* ── Config ── */
-// When deployed (e.g., Vercel + Render), API_BASE should be empty so requests use relative paths
+// When deployed (Vercel + Render), API_BASE is empty so requests use relative paths
 // which get proxied by Vercel rewrites to the backend. When running locally, FastAPI serves both.
 const API_BASE   = (window.__API_BASE__) || '';
-const WS_URL     = API_BASE 
+const WS_URL     = API_BASE
   ? API_BASE.replace(/^http/, 'ws') + '/ws/ask'
   : ((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/ask');
+
+// In production (Vercel), WebSocket to external Render backend may be blocked.
+// Detect if we're on Vercel and skip WebSocket, use REST only.
+const IS_VERCEL = !API_BASE && (window.location.hostname.includes('.vercel.app') || window.location.hostname.includes('vercel.app'));
 
 /* ── App state ── */
 let currentLang         = 'en';
@@ -126,6 +130,12 @@ function clearChat() {
    WEBSOCKET (streaming)
 ═══════════════════════════════════════════════ */
 function connectWebSocket() {
+  // Skip WebSocket on Vercel — external WS connections are blocked
+  if (IS_VERCEL) {
+    setStatus('online', 'Connected to backend');
+    return;
+  }
+
   if (ws) {
     try { ws.close(); } catch (e) { /* ignore */ }
     ws = null;
@@ -269,8 +279,8 @@ async function sendQuery() {
 
   const sources = getSelectedSources();
 
-  // ── Try WebSocket first ──
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  // ── Try WebSocket first (skip on Vercel — WS to external backend blocked) ──
+  if (!IS_VERCEL && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       query,
       language: currentLang,
