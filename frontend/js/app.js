@@ -1,18 +1,16 @@
 /* ═══════════════════════════════════════════════
    app.js — Main application logic
    WebSocket streaming + REST fallback + UI state
+   Enhanced v2: confidence scores, verification badges
 ═══════════════════════════════════════════════ */
 
 /* ── Config ── */
-// When deployed (Vercel + Render), API_BASE is empty so requests use relative paths
-// which get proxied by Vercel rewrites to the backend. When running locally, FastAPI serves both.
 const API_BASE   = (window.__API_BASE__) || '';
 const WS_URL     = API_BASE
   ? API_BASE.replace(/^http/, 'ws') + '/ws/ask'
   : ((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/ask');
 
 // In production (Vercel), WebSocket to external Render backend may be blocked.
-// Detect if we're on Vercel and skip WebSocket, use REST only.
 const IS_VERCEL = !API_BASE && (window.location.hostname.includes('.vercel.app') || window.location.hostname.includes('vercel.app'));
 
 /* ── App state ── */
@@ -21,6 +19,7 @@ let isLoading           = false;
 let ws                  = null;
 let reconnectTimer      = null;
 let _streamBubble       = null;
+let _streamMeta         = {};  // metadata for current stream (confidence, verification, etc.)
 
 /* ═══════════════════════════════════════════════
    INIT
@@ -95,7 +94,6 @@ function restoreChatHistory() {
     const history = JSON.parse(saved);
     if (!history.length) return;
 
-    // Remove welcome screen
     hideWelcome();
 
     history.forEach(msg => {
@@ -113,14 +111,11 @@ function restoreChatHistory() {
 function clearChat() {
   if (!confirm('Clear all chat messages?')) return;
   const msgs = document.getElementById('chatMessages');
-  // Remove all message nodes (keep welcome)
   msgs.querySelectorAll('.msg').forEach(el => el.remove());
-  // Also clear citations
   const list = document.getElementById('citationsList');
   list.querySelectorAll('.citation-card').forEach(el => el.remove());
   document.getElementById('citationCount').textContent = '0';
   document.getElementById('citationsEmpty').classList.remove('hidden');
-  // Show welcome again
   document.getElementById('welcomeScreen').classList.remove('hidden');
   localStorage.removeItem(STORAGE_KEY);
   showToast('Chat cleared');
@@ -130,7 +125,6 @@ function clearChat() {
    WEBSOCKET (streaming)
 ═══════════════════════════════════════════════ */
 function connectWebSocket() {
-  // Skip WebSocket on Vercel — external WS connections are blocked
   if (IS_VERCEL) {
     setStatus('online', 'Connected to backend');
     return;
@@ -198,8 +192,7 @@ function handleStreamError(message) {
   removeTypingIndicator();
   addAssistantBubble(
     `⚠️ ${message}\n\nPlease try rephrasing your question or select different sources.`,
-    [],
-    false
+    [], false
   );
   isLoading = false;
   if (_streamBubble) _streamBubble = null;
@@ -240,13 +233,8 @@ function finalizeStreamResponse(msg) {
       const verseEl = _streamBubble.querySelector('.verse-slot');
       if (verseEl) verseEl.innerHTML = buildVerseDisplay(citations);
 
-      // Badge
-      const badge = _streamBubble.querySelector('.cite-badge');
-      if (badge) {
-        const valid = citations.length > 0;
-        badge.className = `cite-badge ${valid ? 'valid' : 'invalid'}`;
-        badge.innerHTML = `<span></span>${valid ? `Cited — ${citations.length} source${citations.length !== 1 ? 's' : ''}` : 'No citations found — using general knowledge'}`;
-      }
+      // Update meta badge with enhanced info
+      updateMetaBadge(msg, citations);
 
       renderCitationCards(citations);
       addMsgActions(_streamBubble);
@@ -279,14 +267,14 @@ async function sendQuery() {
 
   const sources = getSelectedSources();
 
-  // ── Try WebSocket first (skip on Vercel — WS to external backend blocked) ──
+  // ── Try WebSocket first ──
   if (!IS_VERCEL && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       query,
       language: currentLang,
       sources,
     }));
-    return; // response handled by ws.onmessage
+    return;
   }
 
   // ── REST fallback ──
@@ -317,7 +305,7 @@ async function sendQuery() {
       : extractCitations(answer);
 
     removeTypingIndicator();
-    addAssistantBubble(answer, citations, citations.length > 0);
+    addAssistantBubbleEnhanced(answer, citations, data);
     renderCitationCards(citations);
     setStatus('online', 'Connected to backend');
 
@@ -328,7 +316,14 @@ async function sendQuery() {
     const demo      = getDemoAnswer(query);
     const citations = extractCitations(demo);
     removeTypingIndicator();
-    addAssistantBubble(demo, citations, true);
+    addAssistantBubbleEnhanced(demo, citations, {
+      citation_valid: citations.length > 0,
+      confirmation_score: 0.3,
+      verification_passed: false,
+      source_types: [],
+      safety_flags: [],
+      insufficient_evidence: true,
+    });
     renderCitationCards(citations);
   }
 
@@ -336,7 +331,7 @@ async function sendQuery() {
   scrollBottom();
   saveChatHistory();
 
-  // Save to search history (defined in search-history.js)
+  // Save to search history
   if (typeof addSearchEntry === 'function') {
     const bubble = document.querySelector('#chatMessages .msg:last-child .bubble-content');
     const preview = bubble ? bubble.textContent || '' : '';
@@ -351,7 +346,6 @@ async function uploadDocument(input) {
   const file = input.files[0];
   if (!file) return;
 
-  // Show progress
   const msgs = document.getElementById('chatMessages');
   const progDiv = document.createElement('div');
   progDiv.className = 'msg msg-assistant';
@@ -383,7 +377,7 @@ async function uploadDocument(input) {
 }
 
 /* ═══════════════════════════════════════════════
-   DOM HELPERS
+   ENHANCED DOM HELPERS
 ═══════════════════════════════════════════════ */
 function hideWelcome() {
   document.getElementById('welcomeScreen')?.classList.add('hidden');
@@ -413,7 +407,19 @@ function createAssistantBubble() {
       <span class="bubble-content"></span>
       <div class="verse-slot"></div>
     </div>
-    <div class="cite-badge invalid"><span></span>Generating answer…</div>
+    <div class="meta-row">
+      <div class="cite-badge invalid"><span></span>Generating answer…</div>
+      <div class="confidence-indicator" style="display:none">
+        <div class="confidence-bar">
+          <div class="confidence-fill"></div>
+        </div>
+        <span class="confidence-label"></span>
+      </div>
+    </div>
+    <div class="verification-row" style="display:none">
+      <span class="verification-badge"></span>
+      <div class="source-types"></div>
+    </div>
   `;
   msgs.appendChild(div);
   scrollBottom();
@@ -421,30 +427,114 @@ function createAssistantBubble() {
 }
 
 function addAssistantBubble(text, citations, valid) {
+  addAssistantBubbleEnhanced(text, citations, {
+    citation_valid: valid,
+    confidence_score: valid ? 0.7 : 0.1,
+    verification_passed: valid,
+    source_types: [],
+    safety_flags: [],
+  });
+}
+
+function addAssistantBubbleEnhanced(text, citations, meta) {
   const msgs = document.getElementById('chatMessages');
   const div  = document.createElement('div');
   div.className = 'msg msg-assistant fade-in';
 
   const highlighted = highlightCitations(escapeHtml(text));
   const verseHtml   = buildVerseDisplay(citations);
-  const isValid     = valid !== undefined ? valid : citations.length > 0;
+  const isValid = meta.citation_valid !== undefined ? meta.citation_valid : citations.length > 0;
+  const confidence = meta.confidence_score || 0;
 
   div.innerHTML = `
     <div class="bubble bubble-assistant">
       <span class="bubble-content">${highlighted}</span>
       ${verseHtml}
     </div>
-    <div class="cite-badge ${isValid ? 'valid' : 'invalid'}">
-      <span></span>
-      ${isValid
-        ? `Cited — ${citations.length} source${citations.length !== 1 ? 's' : ''}`
-        : 'No citations found — using general knowledge'}
+    <div class="meta-row">
+      <div class="cite-badge ${isValid ? 'valid' : 'invalid'}">
+        <span></span>
+        ${isValid
+          ? `Cited — ${citations.length} source${citations.length !== 1 ? 's' : ''}`
+          : 'No citations found — using general knowledge'}
+      </div>
+      <div class="confidence-indicator">
+        <div class="confidence-bar">
+          <div class="confidence-fill" style="width: ${confidence * 100}%"></div>
+        </div>
+        <span class="confidence-label">${Math.round(confidence * 100)}% confidence</span>
+      </div>
     </div>
+    <div class="verification-row" style="${meta.verification_passed === undefined ? 'display:none' : ''}">
+      <span class="verification-badge ${meta.verification_passed ? 'passed' : 'failed'}">
+        ${meta.verification_passed ? '✓ Verified' : '⚠ Not verified'}
+      </span>
+      <div class="source-types">
+        ${(meta.source_types || []).map(st => `<span class="source-type-tag ${st}">${st.replace(/_/g, ' ')}</span>`).join('')}
+      </div>
+    </div>
+    ${(meta.safety_flags || []).includes('sensitive_topic')
+      ? '<div class="safety-notice">⚠️ Sensitive topic — please consult a qualified scholar</div>'
+      : ''}
   `;
 
   msgs.appendChild(div);
   addMsgActions(div);
   scrollBottom();
+}
+
+function updateMetaBadge(msg, citations) {
+  if (!_streamBubble) return;
+
+  // Citation badge
+  const badge = _streamBubble.querySelector('.cite-badge');
+  if (badge) {
+    const valid = citations.length > 0;
+    badge.className = `cite-badge ${valid ? 'valid' : 'invalid'}`;
+    badge.innerHTML = `<span></span>${valid
+      ? `Cited — ${citations.length} source${citations.length !== 1 ? 's' : ''}`
+      : 'No citations found — using general knowledge'}`;
+  }
+
+  // Confidence bar
+  const confIndicator = _streamBubble.querySelector('.confidence-indicator');
+  if (confIndicator) {
+    confIndicator.style.display = 'flex';
+    const fill = confIndicator.querySelector('.confidence-fill');
+    const label = confIndicator.querySelector('.confidence-label');
+    const score = msg.confidence_score || 0;
+    if (fill) fill.style.width = `${score * 100}%`;
+    if (label) label.textContent = `${Math.round(score * 100)}% confidence`;
+  }
+
+  // Verification row
+  const verifyRow = _streamBubble.querySelector('.verification-row');
+  if (verifyRow && msg.verification_passed !== undefined) {
+    verifyRow.style.display = 'flex';
+    const vBadge = verifyRow.querySelector('.verification-badge');
+    const srcTypes = verifyRow.querySelector('.source-types');
+    if (vBadge) {
+      vBadge.className = `verification-badge ${msg.verification_passed ? 'passed' : 'failed'}`;
+      vBadge.textContent = msg.verification_passed ? '✓ Verified against sources' : '⚠ Could not fully verify';
+    }
+    if (srcTypes) {
+      srcTypes.innerHTML = (msg.source_types || [])
+        .map(st => `<span class="source-type-tag ${st}">${st.replace(/_/g, ' ')}</span>`)
+        .join('');
+    }
+  }
+
+  // Safety notice
+  const flags = msg.safety_flags || [];
+  if (flags.includes('sensitive_topic')) {
+    const existing = _streamBubble.querySelector('.safety-notice');
+    if (!existing) {
+      const notice = document.createElement('div');
+      notice.className = 'safety-notice';
+      notice.innerHTML = '⚠️ Sensitive topic — please consult a qualified scholar';
+      _streamBubble.appendChild(notice);
+    }
+  }
 }
 
 function addMsgActions(msgDiv) {
@@ -642,7 +732,7 @@ function getDemoAnswer(query) {
 
 "And We will surely test you with something of fear and hunger and a loss of wealth and lives and fruits, but give good tidings to the patient — those who, when disaster strikes them, say: Indeed we belong to Allah, and indeed to Him we will return." [Quran Al-Baqarah 2:155-156]
 
-The Prophet ﷺ said: "No one has been given anything better than patience." [Bukhari, Zakat, No. 1469] He also said: "How wonderful is the affair of the believer! All his affairs are good. If something good happens to him he is grateful, and if something bad happens to him, he is patient." [Muslim, Zuhd, No. 2999]`
+The Prophet ﷺ said: "No one has been given anything better than patience." [Bukhari 1469] He also said: "How wonderful is the affair of the believer! All his affairs are good. If something good happens to him he is grateful, and if something bad happens to him, he is patient." [Muslim 2999]`
     },
     {
       keywords: ['parent', 'mother', 'father', 'mom', 'dad', 'والد', 'أم', 'أب'],
@@ -650,7 +740,7 @@ The Prophet ﷺ said: "No one has been given anything better than patience." [Bu
 
 "And lower to them the wing of humility out of mercy and say: My Lord, have mercy upon them as they brought me up when I was small." [Quran Al-Isra 17:24]
 
-The Prophet ﷺ was asked: "Which deed is the best?" He replied: "Prayer at its proper time." He was asked: "Then what?" He said: "Kindness to parents." [Bukhari, Times of Prayer, No. 527] He also said: "Paradise lies at the feet of mothers." [Ibn Majah, Jihad, No. 2781]`
+The Prophet ﷺ was asked: "Which deed is the best?" He replied: "Prayer at its proper time." He was asked: "Then what?" He said: "Kindness to parents." [Bukhari 527] He also said: "Paradise lies at the feet of mothers." [Ibn Majah 2781]`
     },
     {
       keywords: ['zakat', 'zakah', 'زكاة'],
@@ -660,28 +750,23 @@ The nisab (minimum threshold) for gold is 85 grams and for silver is 595 grams. 
 
 Allah specifies the eight categories of Zakat recipients: "Zakah expenditures are only for the poor and for the needy and for those employed to collect it and for bringing hearts together and for freeing captives and for those in debt and for the cause of Allah and for the traveler." [Quran At-Tawbah 9:60]
 
-The Prophet ﷺ said: "Islam is built upon five pillars: testifying there is no god but Allah and Muhammad is His Messenger, establishing prayer, giving zakat, performing Hajj, and fasting Ramadan." [Bukhari, Faith, No. 8]`
+The Prophet ﷺ said: "Islam is built upon five pillars: testifying there is no god but Allah and Muhammad is His Messenger, establishing prayer, giving zakat, performing Hajj, and fasting Ramadan." [Bukhari 8]`
     },
     {
       keywords: ['music', 'musical', 'song', 'موسيقى', 'غناء'],
       answer: `The majority of Islamic scholars hold that musical instruments (except the duff/hand drum at weddings) are prohibited. Allah says: "And of the people is he who buys the amusement of speech to mislead from the way of Allah without knowledge and who takes it in ridicule." [Quran Luqman 31:6]
 
-Many early scholars — including Ibn Abbas, Ibn Masud, and Ibn Kathir — interpreted "amusement of speech" as singing and musical instruments.
+The Prophet ﷺ said: "There will be among my nation people who will make permissible fornication, silk, alcohol, and musical instruments." [Bukhari 5590]
 
-The Prophet ﷺ said: "There will be among my nation people who will make permissible fornication, silk, alcohol, and musical instruments." [Bukhari, Drinks, No. 5590]
-
-However, the duff (hand drum) is permitted at weddings and Eid celebrations. The Prophet said: "Announce the marriage and beat the duff for it." [Tirmidhi, Marriage, No. 1089]`
-
+However, the duff (hand drum) is permitted at weddings and Eid celebrations. [Tirmidhi 1089]`
     },
     {
       keywords: ['fasting', 'sawm', 'ramadan', 'صوم', 'رمضان'],
       answer: `Fasting (Sawm) is the fourth pillar of Islam. Allah commands: "O you who have believed, decreed upon you is fasting as it was decreed upon those before you that you may become righteous." [Quran Al-Baqarah 2:183]
 
-"And whoever among you is ill or on a journey — then an equal number of other days. And upon those who are able — a ransom of feeding a poor person." [Quran Al-Baqarah 2:184]
+"The month of Ramadan in which was revealed the Quran, a guidance for mankind and clear proofs of guidance and criterion." [Quran Al-Baqarah 2:185]
 
-The month of Ramadan: "The month of Ramadan in which was revealed the Quran, a guidance for mankind and clear proofs of guidance and criterion." [Quran Al-Baqarah 2:185]
-
-The Prophet ﷺ said: "Whoever fasts Ramadan with faith and seeking reward, his previous sins will be forgiven." [Bukhari, Faith, No. 38] He also said: "When Ramadan comes, the gates of Paradise are opened, the gates of Hell are closed, and the devils are chained." [Bukhari, Fasting, No. 1899]`
+The Prophet ﷺ said: "Whoever fasts Ramadan with faith and seeking reward, his previous sins will be forgiven." [Bukhari 38] He also said: "When Ramadan comes, the gates of Paradise are opened, the gates of Hell are closed, and the devils are chained." [Bukhari 1899]`
     },
   ];
 
@@ -691,20 +776,12 @@ The Prophet ﷺ said: "Whoever fasts Ramadan with faith and seeking reward, his 
     }
   }
 
-  // Generic fallback
-  return `Bismillah. Thank you for your question about "${query}". 
+  return `Bismillah. Thank you for your question about "${query}".
 
-The FastAPI backend at ${API_BASE} is currently unreachable. Once connected, I will retrieve answers from the Islamic RAG pipeline using ChromaDB vector search across Quran and Hadith collections.
-
-For example, on the topic of honesty in Islam:
-"O you who have believed, fear Allah and be with the truthful." [Quran At-Tawbah 9:119]
-
-The Prophet ﷺ said: "Adhere to truthfulness, for truthfulness leads to righteousness, and righteousness leads to Paradise." [Bukhari, Good Manners, No. 6094]
-
-"Truthfulness leads to righteousness, and righteousness leads to Paradise. A man continues to tell the truth until he is recorded with Allah as a truthful person." [Muslim, Virtue, No. 2607]
+The FastAPI backend is currently unreachable. Once connected, answers will be retrieved from the Islamic RAG pipeline using vector search across Quran and Hadith collections with source verification and confidence scoring.
 
 To get started with the full RAG pipeline, run:
 \`uvicorn src.api.main:app --reload\`
 
-Then refresh this page and ask anything about Islam.`
+Then refresh this page and ask anything about Islam.`;
 }

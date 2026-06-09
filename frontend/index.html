@@ -131,9 +131,10 @@
             History
             <span class="sidebar-tab-badge" id="historyCount">0</span>
           </button>
-        </div>          <span class="citation-count" id="citationCount">0</span>
-          <button class="sidebar-clear-btn" id="clearHistoryBtn" onclick="clearSearchHistory()" title="Clear history" style="display:none">✕</button>
         </div>
+        <span class="citation-count" id="citationCount">0</span>
+        <button class="sidebar-clear-btn" id="clearHistoryBtn" onclick="clearSearchHistory()" title="Clear history" style="display:none">✕</button>
+      </div>
 
       <!-- Citations tab -->
       <div class="citations-list" id="citationsList">
@@ -159,7 +160,6 @@
   <!-- ═══════════════ SCRIPTS ═══════════════ -->
   <script>
     // Point frontend to the backend. Empty string = same origin (production).
-    // For local dev, change to 'http://localhost:8000'
     window.__API_BASE__ = '';
   </script>
   <script src="js/citations.js"></script>

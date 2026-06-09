@@ -17,10 +17,11 @@ def get_quran_splitter() -> None:
 def get_hadith_splitter() -> RecursiveCharacterTextSplitter:
     """
     Split lengthy hadith into smaller semantic chunks.
+    Hadith are typically short, so we use conservative chunking.
     """
     return RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
+        chunk_size=600,
+        chunk_overlap=80,
         separators=[
             "\n\n",
             "\n",
@@ -34,10 +35,11 @@ def get_hadith_splitter() -> RecursiveCharacterTextSplitter:
 def get_tafsir_splitter() -> RecursiveCharacterTextSplitter:
     """
     Split tafsir at paragraph boundaries while preserving context.
+    Tafsir entries can be lengthy, so we allow larger chunks.
     """
     return RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150,
+        chunk_size=1000,
+        chunk_overlap=200,
         separators=[
             "\n\n",
             "\n",
@@ -54,6 +56,7 @@ def split_with_metadata(
 ) -> List[Document]:
     """
     Split documents while preserving parent metadata.
+    Each chunk inherits all metadata from its parent document.
     """
     if splitter is None:
         return documents
@@ -63,7 +66,7 @@ def split_with_metadata(
     for document in documents:
         split_docs = splitter.split_documents([document])
 
-        for chunk in split_docs:
+        for i, chunk in enumerate(split_docs):
             # Preserve all original metadata
             chunk.metadata.update(document.metadata)
 
@@ -72,6 +75,10 @@ def split_with_metadata(
                 "citation",
                 "Unknown Source",
             )
+
+            # Add chunk index for traceability
+            chunk.metadata["chunk_index"] = i
+            chunk.metadata["total_chunks"] = len(split_docs)
 
             chunks.append(chunk)
 

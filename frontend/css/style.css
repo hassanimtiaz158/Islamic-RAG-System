@@ -622,6 +622,133 @@ body::before {
   background: currentColor;
 }
 
+/* ═══════════════════════════════════════════════
+   ENHANCED META ROW (confidence + verification)
+═══════════════════════════════════════════════ */
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.confidence-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.confidence-bar {
+  width: 60px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.confidence-fill {
+  height: 100%;
+  background: var(--green-rich);
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.confidence-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+
+/* Verification row */
+.verification-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.verification-badge {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.verification-badge.passed {
+  background: rgba(26, 92, 56, 0.08);
+  color: var(--green-rich);
+  border: 1px solid rgba(26, 92, 56, 0.15);
+}
+
+.verification-badge.failed {
+  background: rgba(180, 60, 40, 0.06);
+  color: #b43c28;
+  border: 1px solid rgba(180, 60, 40, 0.15);
+}
+
+/* Source type tags */
+.source-types {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.source-type-tag {
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: capitalize;
+}
+
+.source-type-tag.quran {
+  background: rgba(26, 92, 56, 0.1);
+  color: var(--green-rich);
+  border: 1px solid rgba(26, 92, 56, 0.2);
+}
+
+.source-type-tag.hadith,
+.source-type-tag.bukhari,
+.source-type-tag.muslim,
+.source-type-tag.dawud,
+.source-type-tag.tirmidhi,
+.source-type-tag.nasai,
+.source-type-tag.ibnmajah {
+  background: rgba(201, 168, 76, 0.12);
+  color: #8a6a1a;
+  border: 1px solid rgba(201, 168, 76, 0.25);
+}
+
+.source-type-tag.tafsir,
+.source-type-tag.scholarly_opinion {
+  background: rgba(123, 94, 167, 0.1);
+  color: #7b5ea7;
+  border: 1px solid rgba(123, 94, 167, 0.2);
+}
+
+.source-type-tag.none,
+.source-type-tag.retrieved_context {
+  background: rgba(107, 90, 62, 0.08);
+  color: var(--ink-light);
+  border: 1px solid var(--border);
+}
+
+/* Safety notice */
+.safety-notice {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(201, 168, 76, 0.08);
+  border: 1px solid rgba(201, 168, 76, 0.2);
+  border-radius: 8px;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: #8a6a1a;
+  letter-spacing: 0.04em;
+}
+
 /* Arabic / RTL bubble */
 .bubble-arabic {
   direction: rtl;

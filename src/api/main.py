@@ -7,7 +7,10 @@ Provides chat/query, document upload, citation verification, and health check.
 import os
 import threading
 import logging
+import time
 from pathlib import Path
+from typing import Optional
+from functools import lru_cache
 
 from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +22,12 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# ── Logging Configuration ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger("islamic-rag")
 
 # ── Environment ──
@@ -29,7 +36,36 @@ LLM_MODEL = os.getenv("LLM_MODEL", "phi3")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# ── RAG dependencies (lazy init to keep server startup fast) ──
+# ── Response cache (simple in-memory) ──
+_response_cache: dict = {}
+_cache_lock = threading.Lock()
+_CACHE_MAX_SIZE = 200
+_CACHE_TTL = 300  # seconds
+
+
+def _cache_get(key: str) -> Optional[dict]:
+    """Get cached response if not expired."""
+    with _cache_lock:
+        if key in _response_cache:
+            entry = _response_cache[key]
+            if time.time() - entry["ts"] < _CACHE_TTL:
+                return entry["data"]
+            else:
+                del _response_cache[key]
+    return None
+
+
+def _cache_set(key: str, data: dict) -> None:
+    """Cache a response with TTL."""
+    with _cache_lock:
+        if len(_response_cache) >= _CACHE_MAX_SIZE:
+            # Evict oldest entry
+            oldest_key = min(_response_cache, key=lambda k: _response_cache[k]["ts"])
+            del _response_cache[oldest_key]
+        _response_cache[key] = {"ts": time.time(), "data": data}
+
+
+# ── RAG dependencies (lazy init) ──
 vector_store = None
 graph = None
 _rag_initialized = False
@@ -37,12 +73,12 @@ _rag_init_lock = threading.Lock()
 
 
 def _init_rag():
-    """Lazy initialization of the RAG pipeline. Called on first request."""
+    """Lazy initialization of the RAG pipeline."""
     global vector_store, graph, _rag_initialized
     with _rag_init_lock:
         if _rag_initialized:
             return
-        _rag_initialized = True  # Mark as initialized BEFORE attempting import to prevent re-entry
+        _rag_initialized = True
     try:
         from src.core.islamic_vectorDB import IslamicVectorStore
         from src.agents.islamic_graph import build_islamic_graph
@@ -60,7 +96,7 @@ def _init_rag():
 # =========================
 app = FastAPI(
     title="Al-Ilm — Islamic Knowledge RAG API",
-    version="1.1.0",
+    version="2.0.0",
     description="AI-powered Islamic knowledge chatbot with source-backed answers from Quran, Hadith, and Tafsir.",
 )
 
@@ -71,15 +107,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Frontend path (mounted after API routes)
+# Frontend path
 FRONTEND_PATH = Path(__file__).resolve().parent.parent.parent / "frontend"
 
 
 # =========================
-# REQUEST/ RESPONSE MODELS
+# REQUEST/RESPONSE MODELS
 # =========================
 class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, description="User's question about Islam")
+    query: str = Field(..., min_length=1, max_length=2000, description="User's question about Islam")
     language: str = Field(default="en", pattern="^(en|ar|ur)$")
     sources: list[str] = Field(default_factory=lambda: ["quran", "hadith_bukhari"])
 
@@ -90,6 +126,21 @@ class QueryResponse(BaseModel):
     citation_cards: list[dict] = []
     citation_valid: bool = False
     sources_used: list[str] = []
+    confidence_score: float = 0.0
+    verification_passed: bool = False
+    source_types: list[str] = []
+    safety_flags: list[str] = []
+    retrieval_confidence: float = 0.0
+    insufficient_evidence: bool = False
+
+
+class HealthResponse(BaseModel):
+    status: str
+    rag_available: bool
+    llm_provider: str
+    llm_model: str
+    version: str = "2.0.0"
+    collections: dict = {}
 
 
 # =========================
@@ -117,7 +168,7 @@ FALLBACK_ANSWERS = {
         "citations": ["[Quran Al-Ankabut 29:45]", "[Quran Al-Baqarah 2:110]"],
     },
     "music": {
-        "answer": 'The majority of Islamic scholars hold that musical instruments (except the duff/hand drum at weddings) are prohibited. Allah says: "And of the people is he who buys the amusement of speech to mislead from the way of Allah without knowledge and who takes it in ridicule." [Quran Luqman 31:6]\n\nThe Prophet ﷺ said: "There will be among my nation people who will make permissible fornication, silk, alcohol, and musical instruments." [Bukhari 5590]\n\nHowever, the duff (hand drum) is permitted at weddings and Eid celebrations. [Tirmidhi 1089]',
+        "answer": 'The majority of Islamic scholars hold that musical instruments (except the duff/hand drum at weddings) are prohibited. Allah says: "And of the people is he who buys the amusement of speech to mislead from the way of Allah without knowledge and who takes it in ridicule." [Quran Luqman 31:6]\n\nThe Prophet ﷺ said: "There will be among my nation people who will make permissible fornication, silk, alcohol, and musical instruments." [Bukhari 5590]\n\nHowever, the duff (hand drum) is permitted at weddings and Eid celebrations. [Tirmidhi 1089]\n\n⚠️ **Important Note:** This topic involves nuanced Islamic rulings. The information above is based on the retrieved sources. For personal religious obligations, please consult a qualified Islamic scholar.',
         "citations": ["[Quran Luqman 31:6]", "[Bukhari 5590]", "[Tirmidhi 1089]"],
     },
     "honesty": {
@@ -129,7 +180,7 @@ FALLBACK_ANSWERS = {
         "citations": ["[Quran Al-Anbiya 21:107]", "[Muslim 2593]", "[Bukhari 5997]", "[Bukhari 2466]"],
     },
     "charity": {
-        "answer": 'Charity (Sadaqah) is deeply encouraged in Islam beyond the obligatory Zakat. Allah says: "The example of those who spend their wealth in the way of Allah is like a seed of grain which grows seven spikes; in each spike is a hundred grains." [Quran Al-Baqarah 2:261]\n\nThe Prophet ﷺ said: "Charity does not decrease wealth." [Muslim 2588]\n\nHe also said: "Every act of goodness is charity. Smiling at your brother is charity. A good word is charity. Every step you take toward prayer is charity. Removing a harmful object from the road is charity." [Muslim 1009]\n\n"He who sleeps with a full stomach while his neighbor goes hungry is not one of us."',
+        "answer": 'Charity (Sadaqah) is deeply encouraged in Islam beyond the obligatory Zakat. Allah says: "The example of those who spend their wealth in the way of Allah is like a seed of grain which grows seven spikes; in each spike is a hundred grains." [Quran Al-Baqarah 2:261]\n\nThe Prophet ﷺ said: "Charity does not decrease wealth." [Muslim 2588]\n\nHe also said: "Every act of goodness is charity. Smiling at your brother is charity. A good word is charity. Every step you take toward prayer is charity. Removing a harmful object from the road is charity." [Muslim 1009]',
         "citations": ["[Quran Al-Baqarah 2:261]", "[Muslim 2588]", "[Muslim 1009]"],
     },
 }
@@ -156,34 +207,39 @@ FALLBACK_CITATION_CARDS = [
 ]
 
 
-def _get_fallback_answer(query: str) -> QueryResponse:
+def _get_fallback_response(query: str) -> QueryResponse:
     """Generate a response from the curated fallback knowledge base."""
     q = query.lower()
 
-    # Score each entry by number of keyword matches for best match
-    scored = []
+    # Score each entry by keyword matches
+    best_score = 0
+    best_entry = None
+
     for key, entry in FALLBACK_ANSWERS.items():
-        words = key.split()
-        score = sum(1 for word in words if word in q)
-        scored.append((score, key, entry))
+        score = sum(1 for kw in key.split() if kw in q)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_key, best_entry = scored[0]
-
-    if best_score > 0:
+    if best_score > 0 and best_entry:
         return QueryResponse(
             answer=best_entry["answer"],
             citations=best_entry["citations"],
             citation_cards=FALLBACK_CITATION_CARDS,
             citation_valid=True,
             sources_used=["quran", "hadith_bukhari"],
+            confidence_score=0.5,
+            verification_passed=True,
+            source_types=["quran", "hadith"],
+            safety_flags=[],
+            retrieval_confidence=0.3,
+            insufficient_evidence=False,
         )
 
     return QueryResponse(
         answer=(
             f'Bismillah. Thank you for your question about "{query}".\n\n'
-            "The RAG pipeline is currently unavailable, but I can still help with common Islamic topics. "
-            "Try asking about:\n"
+            "The RAG pipeline is currently unavailable. Here are some topics I can help with:\n"
             "• Patience (Sabr) and trials\n"
             "• Honoring parents\n"
             "• Zakat and charity\n"
@@ -191,13 +247,18 @@ def _get_fallback_answer(query: str) -> QueryResponse:
             "• Prayer (Salah)\n"
             "• Honesty and truthfulness\n"
             "• Kindness to animals and people\n\n"
-            "Note: For full AI-powered answers with Quran and Hadith sources, "
-            "connect the backend to an LLM (OpenAI, Groq, or Ollama)."
+            "For the full AI-powered experience, connect the backend to an LLM."
         ),
         citations=[],
         citation_cards=[],
         citation_valid=False,
         sources_used=[],
+        confidence_score=0.0,
+        verification_passed=False,
+        source_types=["none"],
+        safety_flags=[],
+        retrieval_confidence=0.0,
+        insufficient_evidence=True,
     )
 
 
@@ -205,16 +266,26 @@ def _get_fallback_answer(query: str) -> QueryResponse:
 # REST API ENDPOINTS
 # =========================
 
-@app.get("/api/health")
+@app.get("/api/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "ok",
-        "rag_available": graph is not None,
-        "llm_provider": LLM_PROVIDER,
-        "llm_model": LLM_MODEL,
-        "version": "1.1.0",
-    }
+    """Health check endpoint with collection info."""
+    collections_info = {}
+    if vector_store is not None:
+        try:
+            for col_name in vector_store.list_collections():
+                count = vector_store.get_collection_count(col_name)
+                collections_info[col_name] = count
+        except Exception:
+            pass
+
+    return HealthResponse(
+        status="ok",
+        rag_available=graph is not None,
+        llm_provider=LLM_PROVIDER,
+        llm_model=LLM_MODEL,
+        version="2.0.0",
+        collections=collections_info,
+    )
 
 
 @app.post("/api/ask", response_model=QueryResponse)
@@ -224,15 +295,28 @@ async def ask_islamic(req: QueryRequest):
     Uses the RAG pipeline if available, otherwise falls back to curated knowledge.
     """
     _init_rag()
+
+    # Check cache
+    cache_key = f"{req.query}:{req.language}:{','.join(sorted(req.sources))}"
+    cached = _cache_get(cache_key)
+    if cached:
+        logger.info(f"Cache hit for query: {req.query[:50]}...")
+        return QueryResponse(**cached)
+
     if graph is not None:
         try:
+            start_time = time.time()
+
             result = graph.invoke({
                 "query": req.query,
                 "language": req.language,
                 "retrieved_docs": {},
-                "routing": [],
+                "routing": req.sources,
                 "iteration": 0,
             })
+
+            elapsed = time.time() - start_time
+            logger.info(f"RAG query completed in {elapsed:.2f}s")
 
             answer = result.get("response", "")
             citations = result.get("citations", [])
@@ -240,26 +324,35 @@ async def ask_islamic(req: QueryRequest):
             citation_valid = result.get("citation_valid", False)
             sources_used = list(result.get("retrieved_docs", {}).keys())
 
-            return QueryResponse(
+            response = QueryResponse(
                 answer=answer,
                 citations=citations,
                 citation_cards=citation_cards,
                 citation_valid=citation_valid,
                 sources_used=sources_used,
+                confidence_score=result.get("confidence_score", 0.0),
+                verification_passed=result.get("verification_passed", False),
+                source_types=result.get("source_types", []),
+                safety_flags=result.get("safety_flags", []),
+                retrieval_confidence=result.get("retrieval_confidence", 0.0),
+                insufficient_evidence=result.get("insufficient_evidence", False),
             )
+
+            # Cache the response
+            _cache_set(cache_key, response.model_dump())
+
+            return response
+
         except Exception as e:
-            logger.error(f"RAG pipeline error: {e}")
+            logger.error(f"RAG pipeline error: {e}", exc_info=True)
             # Fall through to fallback
 
-    return _get_fallback_answer(req.query)
+    return _get_fallback_response(req.query)
 
 
 @app.post("/api/index-document")
 async def index_document(file: UploadFile = File(...)):
-    """
-    Upload and index an Islamic text document (PDF or TXT).
-    The document is split into chunks and indexed into the vector store.
-    """
+    """Upload and index an Islamic text document (PDF or TXT)."""
     _init_rag()
     if vector_store is None:
         raise HTTPException(
@@ -270,7 +363,10 @@ async def index_document(file: UploadFile = File(...)):
     try:
         content = await file.read()
 
-        # Try to extract text depending on file type
+        # Limit file size (50MB)
+        if len(content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 50MB.")
+
         text = None
         if file.filename and file.filename.lower().endswith(".pdf"):
             try:
@@ -283,7 +379,6 @@ async def index_document(file: UploadFile = File(...)):
                     detail=f"Failed to extract text from PDF: {e}. Try uploading a .txt file.",
                 )
         else:
-            # TXT or other text files
             text = content.decode("utf-8", errors="replace")
 
         if not text or not text.strip():
@@ -291,7 +386,7 @@ async def index_document(file: UploadFile = File(...)):
 
         from langchain_core.documents import Document
 
-        # Simple chunking by paragraphs
+        # Chunk by paragraphs
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         docs = [
             Document(
@@ -318,7 +413,7 @@ async def index_document(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Indexing error: {e}")
+        logger.error(f"Indexing error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
 
 
@@ -366,13 +461,12 @@ async def ws_ask(ws: WebSocket):
 
             if graph is not None:
                 try:
-                    # Stream tokens from RAG pipeline
                     async for event in graph.astream_events(
                         {
                             "query": query,
                             "language": language,
                             "retrieved_docs": {},
-                            "routing": [],
+                            "routing": data.get("sources", ["quran", "hadith_bukhari"]),
                             "iteration": 0,
                         },
                         version="v2",
@@ -388,14 +482,17 @@ async def ws_ask(ws: WebSocket):
                                 "type": "done",
                                 "citation_cards": output.get("citation_cards", []),
                                 "citation_valid": output.get("citation_valid", False),
+                                "confidence_score": output.get("confidence_score", 0.0),
+                                "verification_passed": output.get("verification_passed", False),
+                                "source_types": output.get("source_types", []),
+                                "safety_flags": output.get("safety_flags", []),
                             })
                     continue
                 except Exception as e:
                     logger.error(f"WS RAG error: {e}")
-                    # Fall through
 
-            # Fallback: send the fallback answer
-            fb = _get_fallback_answer(query)
+            # Fallback
+            fb = _get_fallback_response(query)
             for token in fb.answer.split(" "):
                 await ws.send_json({"type": "token", "content": token + " "})
 
@@ -403,6 +500,10 @@ async def ws_ask(ws: WebSocket):
                 "type": "done",
                 "citation_cards": fb.citation_cards,
                 "citation_valid": fb.citation_valid,
+                "confidence_score": fb.confidence_score,
+                "verification_passed": fb.verification_passed,
+                "source_types": fb.source_types,
+                "safety_flags": fb.safety_flags,
             })
 
     except Exception as e:
@@ -414,7 +515,7 @@ async def ws_ask(ws: WebSocket):
 
 
 # =========================
-# MOUNT FRONTEND (after API/WS routes)
+# MOUNT FRONTEND
 # =========================
 if FRONTEND_PATH.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_PATH), html=True), name="frontend")
