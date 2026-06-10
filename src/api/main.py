@@ -8,6 +8,7 @@ import os
 import threading
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from functools import lru_cache
@@ -65,6 +66,62 @@ def _cache_set(key: str, data: dict) -> None:
         _response_cache[key] = {"ts": time.time(), "data": data}
 
 
+# ── Conversation store (in-memory, TTL-based) ──
+_conversation_store: dict = {}  # {conversation_id: {"history": [...], "ts": time}}
+_CONV_LOCK = threading.Lock()
+_CONV_MAX_SESSIONS = 100
+_CONV_TTL = 1800  # 30 minutes
+
+
+def _get_conversation(conversation_id: str) -> Optional[list]:
+    """Get conversation history if session exists and is not expired."""
+    with _CONV_LOCK:
+        if conversation_id in _conversation_store:
+            entry = _conversation_store[conversation_id]
+            if time.time() - entry["ts"] < _CONV_TTL:
+                return entry["history"]
+            else:
+                del _conversation_store[conversation_id]
+    return None
+
+
+def _save_conversation(conversation_id: str, history: list) -> None:
+    """Save conversation history, evicting oldest if at capacity."""
+    with _CONV_LOCK:
+        if len(_conversation_store) >= _CONV_MAX_SESSIONS and conversation_id not in _conversation_store:
+            oldest_key = min(_conversation_store, key=lambda k: _conversation_store[k]["ts"])
+            del _conversation_store[oldest_key]
+        _conversation_store[conversation_id] = {"ts": time.time(), "history": history}
+
+
+def _build_conversation_context(conversation_id: str, current_query: str) -> tuple:
+    """
+    Build context with conversation history prepended.
+    Returns (augmented_query, conversation_id).
+    """
+    history = _get_conversation(conversation_id) if conversation_id else None
+
+    if not history:
+        # New conversation
+        new_id = str(uuid.uuid4())[:8]
+        return current_query, new_id
+
+    # Build context from last 3 turns
+    context_lines = ["[Previous conversation for context:]"]
+    for turn in history[-3:]:
+        role = turn.get("role", "user")
+        content = turn.get("content", "")[:300]  # Truncate long messages
+        if role == "user":
+            context_lines.append(f"User: {content}")
+        else:
+            context_lines.append(f"Assistant: {content}")
+    context_lines.append("")
+    context_lines.append("[Current question:]")
+    context_lines.append(current_query)
+
+    return "\n".join(context_lines), conversation_id
+
+
 # ── RAG dependencies (lazy init) ──
 vector_store = None
 graph = None
@@ -118,6 +175,7 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000, description="User's question about Islam")
     language: str = Field(default="en", pattern="^(en|ar|ur)$")
     sources: list[str] = Field(default_factory=lambda: ["quran", "hadith_bukhari"])
+    conversation_id: str = Field(default="", description="Optional conversation session ID for multi-turn chat")
 
 
 class QueryResponse(BaseModel):
@@ -132,6 +190,17 @@ class QueryResponse(BaseModel):
     safety_flags: list[str] = []
     retrieval_confidence: float = 0.0
     insufficient_evidence: bool = False
+    # Multilingual fields
+    language: str = "en"
+    original_query: str = ""
+    translated_query: str = ""
+    response_language: str = "en"
+    # New fields (Phase 5)
+    conversation_id: str = ""
+    follow_up_questions: list[str] = []
+    verse_triplets: list[dict] = []
+    hallucination_ratio: float = 0.0
+    fact_check_passed: bool = True
 
 
 class HealthResponse(BaseModel):
@@ -206,8 +275,30 @@ FALLBACK_CITATION_CARDS = [
     },
 ]
 
+# ═══════════════════════════════════════════════
+# MULTILINGUAL FALLBACK ANSWERS (Phase 4)
+# ═══════════════════════════════════════════════
+FALLBACK_NOT_FOUND = {
+    "en": (
+        "I could not find sufficient evidence in the available Islamic sources "
+        "to answer this question. Please try rephrasing your question or "
+        "selecting additional sources. For specific Islamic rulings, "
+        "please consult a qualified Islamic scholar."
+    ),
+    "ar": (
+        "لم أتمكن من العثور على أدلة كافية في المصادر الإسلامية المتاحة "
+        "للإجابة على هذا السؤال. يرجى إعادة صياغة سؤالك أو اختيار مصادر إضافية. "
+        "للأحكام الإسلامية المحددة، يرجى استشارة عالم إسلامي مؤهل."
+    ),
+    "ur": (
+        "میں دستیاب اسلامی ذرائع میں اس سوال کا جواب دینے کے لیے کافی دلیل "
+        "نہیں ڈھونڈ سکا۔ براہ کرم اپنا سوال دوبارہ لکھیں یا مزید ذرائع منتخب کریں۔ "
+        "مخصوص اسلامی احکام کے لیے، براہ کرم ایک مستند اسلامی عالم سے مشورہ کریں۔"
+    ),
+}
 
-def _get_fallback_response(query: str) -> QueryResponse:
+
+def _get_fallback_response(query: str, language: str = "en") -> QueryResponse:
     """Generate a response from the curated fallback knowledge base."""
     q = query.lower()
 
@@ -234,21 +325,14 @@ def _get_fallback_response(query: str) -> QueryResponse:
             safety_flags=[],
             retrieval_confidence=0.3,
             insufficient_evidence=False,
+            language=language,
+            original_query=query,
+            response_language=language,
         )
 
+    not_found_msg = FALLBACK_NOT_FOUND.get(language, FALLBACK_NOT_FOUND["en"])
     return QueryResponse(
-        answer=(
-            f'Bismillah. Thank you for your question about "{query}".\n\n'
-            "The RAG pipeline is currently unavailable. Here are some topics I can help with:\n"
-            "• Patience (Sabr) and trials\n"
-            "• Honoring parents\n"
-            "• Zakat and charity\n"
-            "• Fasting and Ramadan\n"
-            "• Prayer (Salah)\n"
-            "• Honesty and truthfulness\n"
-            "• Kindness to animals and people\n\n"
-            "For the full AI-powered experience, connect the backend to an LLM."
-        ),
+        answer=not_found_msg,
         citations=[],
         citation_cards=[],
         citation_valid=False,
@@ -259,6 +343,9 @@ def _get_fallback_response(query: str) -> QueryResponse:
         safety_flags=[],
         retrieval_confidence=0.0,
         insufficient_evidence=True,
+        language=language,
+        original_query=query,
+        response_language=language,
     )
 
 
@@ -307,12 +394,23 @@ async def ask_islamic(req: QueryRequest):
         try:
             start_time = time.time()
 
+            # Build conversation context
+            augmented_query, conv_id = _build_conversation_context(
+                req.conversation_id, req.query
+            )
+
             result = graph.invoke({
-                "query": req.query,
+                "query": augmented_query,
                 "language": req.language,
+                "original_query": req.query,
+                "translated_query": augmented_query,
+                "response_language": req.language,
                 "retrieved_docs": {},
                 "routing": req.sources,
                 "iteration": 0,
+                "conversation_id": conv_id,
+                "conversation_history": [],
+                "is_followup": bool(req.conversation_id),
             })
 
             elapsed = time.time() - start_time
@@ -323,6 +421,12 @@ async def ask_islamic(req: QueryRequest):
             citation_cards = result.get("citation_cards", [])
             citation_valid = result.get("citation_valid", False)
             sources_used = list(result.get("retrieved_docs", {}).keys())
+
+            # Save conversation turn
+            history = _get_conversation(conv_id) or []
+            history.append({"role": "user", "content": req.query})
+            history.append({"role": "assistant", "content": answer[:500]})
+            _save_conversation(conv_id, history)
 
             response = QueryResponse(
                 answer=answer,
@@ -336,6 +440,15 @@ async def ask_islamic(req: QueryRequest):
                 safety_flags=result.get("safety_flags", []),
                 retrieval_confidence=result.get("retrieval_confidence", 0.0),
                 insufficient_evidence=result.get("insufficient_evidence", False),
+                language=result.get("response_language", req.language),
+                original_query=result.get("original_query", req.query),
+                translated_query=result.get("translated_query", augmented_query),
+                response_language=result.get("response_language", req.language),
+                conversation_id=conv_id,
+                follow_up_questions=result.get("follow_up_questions", []),
+                verse_triplets=result.get("verse_triplets", []),
+                hallucination_ratio=result.get("hallucination_ratio", 0.0),
+                fact_check_passed=result.get("fact_check_passed", True),
             )
 
             # Cache the response
@@ -347,7 +460,7 @@ async def ask_islamic(req: QueryRequest):
             logger.error(f"RAG pipeline error: {e}", exc_info=True)
             # Fall through to fallback
 
-    return _get_fallback_response(req.query)
+    return _get_fallback_response(req.query, req.language)
 
 
 @app.post("/api/index-document")
@@ -419,26 +532,60 @@ async def index_document(file: UploadFile = File(...)):
 
 @app.get("/api/verify-citation")
 async def verify_citation(surah: int, ayah: int):
-    """Verify a Quran citation against AlQuran.cloud API."""
+    """Verify a Quran citation and return Arabic + English text."""
     import requests
 
     try:
-        url = f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}/en.yusufali"
-        resp = requests.get(url, timeout=10)
+        # Fetch both Arabic and English in parallel
+        arabic_url = f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}"
+        english_url = f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}/en.yusufali"
 
-        if resp.status_code == 200:
-            data = resp.json()["data"]
-            return {
-                "verified": True,
-                "text": data["text"],
-                "surah": data["surah"]["englishName"],
-                "surah_number": data["surah"]["number"],
-                "ayah_number": data["numberInSurah"],
-            }
+        arabic_resp = requests.get(arabic_url, timeout=10)
+        english_resp = requests.get(english_url, timeout=10)
 
-        return {"verified": False, "error": "Verse not found"}
+        result = {"verified": False}
+
+        if arabic_resp.status_code == 200:
+            arabic_data = arabic_resp.json()["data"]
+            result["verified"] = True
+            result["arabic"] = arabic_data["text"]
+            result["surah"] = arabic_data["surah"]["englishName"]
+            result["surah_number"] = arabic_data["surah"]["number"]
+            result["ayah_number"] = arabic_data["numberInSurah"]
+
+        if english_resp.status_code == 200:
+            english_data = english_resp.json()["data"]
+            result["english"] = english_data["text"]
+
+        if not result["verified"]:
+            result["error"] = "Verse not found"
+        return result
+
     except Exception as e:
         return {"verified": False, "error": str(e)}
+
+
+class TranslateVerseRequest(BaseModel):
+    text: str = Field(default="", description="Text to translate")
+    target_lang: str = Field(default="ur", description="Target language code (ur/ar)")
+
+
+@app.post("/api/translate-verse")
+async def translate_verse(req: TranslateVerseRequest):
+    """Translate verse text to Urdu or Arabic using the LLM."""
+    if not req.text or req.target_lang not in ("ur", "ar"):
+        return {"translated": req.text}
+
+    try:
+        from src.agents.islamic_graph import _get_llm
+        from src.utils.translator import translate_text
+
+        llm = _get_llm()
+        translated = translate_text(req.text, "en", req.target_lang, llm)
+        return {"translated": translated}
+    except Exception as e:
+        logger.warning(f"Verse translation failed: {e}")
+        return {"translated": req.text, "error": str(e)}
 
 
 # =========================
@@ -461,13 +608,24 @@ async def ws_ask(ws: WebSocket):
 
             if graph is not None:
                 try:
+                    ws_conversation_id = data.get("conversation_id", "")
+                    augmented_query, conv_id = _build_conversation_context(
+                        ws_conversation_id, query
+                    )
+
                     async for event in graph.astream_events(
                         {
-                            "query": query,
+                            "query": augmented_query,
                             "language": language,
+                            "original_query": query,
+                            "translated_query": augmented_query,
+                            "response_language": language,
                             "retrieved_docs": {},
                             "routing": data.get("sources", ["quran", "hadith_bukhari"]),
                             "iteration": 0,
+                            "conversation_id": conv_id,
+                            "conversation_history": [],
+                            "is_followup": bool(ws_conversation_id),
                         },
                         version="v2",
                     ):
@@ -478,6 +636,12 @@ async def ws_ask(ws: WebSocket):
 
                         elif event["event"] == "on_chain_end":
                             output = event.get("data", {}).get("output", {})
+                            # Save conversation
+                            history = _get_conversation(conv_id) or []
+                            history.append({"role": "user", "content": query})
+                            history.append({"role": "assistant", "content": output.get("response", "")[:500]})
+                            _save_conversation(conv_id, history)
+
                             await ws.send_json({
                                 "type": "done",
                                 "citation_cards": output.get("citation_cards", []),
@@ -486,6 +650,11 @@ async def ws_ask(ws: WebSocket):
                                 "verification_passed": output.get("verification_passed", False),
                                 "source_types": output.get("source_types", []),
                                 "safety_flags": output.get("safety_flags", []),
+                                "follow_up_questions": output.get("follow_up_questions", []),
+                                "verse_triplets": output.get("verse_triplets", []),
+                                "conversation_id": conv_id,
+                                "hallucination_ratio": output.get("hallucination_ratio", 0.0),
+                                "fact_check_passed": output.get("fact_check_passed", True),
                             })
                     continue
                 except Exception as e:

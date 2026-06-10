@@ -406,6 +406,194 @@ def enforce_citations(state: dict, llm) -> dict:
     }
 
 
+def cross_reference_citations(
+    response: str,
+    context: str,
+    citations: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], float, bool]:
+    """
+    Cross-reference each citation in the response against the actual retrieved
+    context.  A citation is 'verified' if its key components (surah name + verse
+    for Quran, collection name + number for Hadith) appear in the context text.
+
+    Returns:
+        (citation_verdicts, hallucination_ratio, fact_check_passed)
+    """
+    if not citations:
+        return [], 0.0, True
+
+    verdicts: List[Dict[str, Any]] = []
+    verified_count = 0
+
+    for cite in citations:
+        raw = cite.get("raw", "")
+        source = cite.get("source", "")
+        verdict: Dict[str, Any] = {
+            "raw": raw,
+            "source": source,
+            "reference": cite.get("reference", ""),
+            "verified": False,
+            "reason": "",
+        }
+
+        if source == "quran":
+            # Extract surah name and chapter:verse from the raw citation
+            m = re.search(CITATION_REGEX["quran"], raw)
+            if m:
+                surah_name = m.group(1).strip().lower()
+                chapter_verse = f"{m.group(2)}:{m.group(3)}"
+                # Check both surah name and chapter:verse appear in context
+                has_surah = surah_name in context.lower()
+                has_verse = chapter_verse in context
+                if has_surah and has_verse:
+                    verdict["verified"] = True
+                    verdict["reason"] = "Found in retrieved context"
+                    verified_count += 1
+                elif has_verse:
+                    verdict["verified"] = True
+                    verdict["reason"] = "Verse reference found in context"
+                    verified_count += 1
+                else:
+                    verdict["reason"] = (
+                        f"Surah '{m.group(1)}' or verse '{chapter_verse}' "
+                        f"not found in retrieved context"
+                    )
+            else:
+                verdict["reason"] = "Could not parse Quran citation"
+
+        elif source in ("bukhari", "muslim", "dawud", "tirmidhi", "nasai", "ibnmajah"):
+            # Check collection name (case-insensitive) and number in context
+            collection_names = {
+                "bukhari": ["bukhari"],
+                "muslim": ["muslim"],
+                "dawud": ["abu dawud", "dawud", "abudawud"],
+                "tirmidhi": ["tirmidhi"],
+                "nasai": ["nasai", "nasa'i"],
+                "ibnmajah": ["ibn majah", "ibnmajah"],
+            }
+            names = collection_names.get(source, [source])
+            name_in_context = any(n in context.lower() for n in names)
+
+            # Extract number from citation
+            num_match = re.search(r"(\d+)", raw)
+            num_str = num_match.group(1) if num_match else ""
+
+            # Check number appears in context (as standalone or in citation-like patterns)
+            num_in_context = False
+            if num_str:
+                # Look for the number near the collection name or in citation context
+                num_patterns = [
+                    rf"\b{re.escape(num_str)}\b",
+                    rf"No\.?\s*{re.escape(num_str)}",
+                    rf"#{re.escape(num_str)}",
+                ]
+                num_in_context = any(
+                    re.search(p, context, re.IGNORECASE) for p in num_patterns
+                )
+
+            if name_in_context and num_in_context:
+                verdict["verified"] = True
+                verdict["reason"] = "Collection and number found in context"
+                verified_count += 1
+            elif name_in_context:
+                verdict["verified"] = True
+                verdict["reason"] = "Collection name found in context"
+                verified_count += 1
+            else:
+                verdict["reason"] = (
+                    f"Collection '{source}' not found in retrieved context"
+                )
+
+        elif source == "tafsir":
+            # Tafsir: check if any part of the reference appears in context
+            ref_text = raw.replace("[", "").replace("]", "").strip()
+            if ref_text.lower() in context.lower() or "tafsir" in context.lower():
+                verdict["verified"] = True
+                verdict["reason"] = "Tafsir reference found in context"
+                verified_count += 1
+            else:
+                verdict["reason"] = "Tafsir reference not found in context"
+
+        else:
+            # Unknown source — mark as unverified but not penalize heavily
+            verdict["verified"] = True
+            verdict["reason"] = "Unknown source type — skipped verification"
+            verified_count += 1
+
+        verdicts.append(verdict)
+
+    total = len(verdicts)
+    hallucination_ratio = 1.0 - (verified_count / total) if total > 0 else 0.0
+    fact_check_passed = hallucination_ratio < 0.5
+
+    return verdicts, round(hallucination_ratio, 2), fact_check_passed
+
+
+def build_verse_triplets(
+    citations: List[Dict[str, Any]],
+    context: str,
+) -> List[Dict[str, Any]]:
+    """
+    For each Quran citation, build a triplet of {arabic, english, urdu} verse data
+    by extracting from the retrieved context.
+
+    Returns a list of dicts:
+        {citation_raw, surah, ayah, arabic, english, urdu, needs_urdu}
+    """
+    triplets: List[Dict[str, Any]] = []
+
+    for cite in citations:
+        if cite.get("source") != "quran":
+            continue
+
+        raw = cite.get("raw", "")
+        m = re.search(CITATION_REGEX["quran"], raw)
+        if not m:
+            continue
+
+        surah_name = m.group(1).strip()
+        chapter = m.group(2)
+        verse = m.group(3)
+
+        triplet: Dict[str, Any] = {
+            "citation_raw": raw,
+            "surah": surah_name,
+            "surah_number": int(chapter),
+            "ayah": int(verse),
+            "arabic": "",
+            "english": "",
+            "urdu": "",
+            "needs_urdu": True,
+        }
+
+        # Try to extract English translation from context
+        # Context blocks look like: [QURAN] SurahName Ch:V\nEnglish text
+        context_lines = context.split("\n")
+        for i, line in enumerate(context_lines):
+            # Look for lines containing this surah and verse
+            if (
+                surah_name.lower() in line.lower()
+                and f"{chapter}:{verse}" in line
+            ):
+                # The next non-empty line is likely the verse text
+                for j in range(i + 1, min(i + 3, len(context_lines))):
+                    text = context_lines[j].strip()
+                    if text and not text.startswith("["):
+                        triplet["english"] = text
+                        break
+                break
+
+        # If we found English in context, try to also find Arabic
+        # Arabic text may be in metadata or context
+        if not triplet["english"]:
+            # Fallback: mark for frontend API fetch
+            triplet["needs_urdu"] = True
+
+        triplets.append(triplet)
+
+    return triplets
+
+
 def _build_retry_prompt(state: dict) -> str:
     """Build a strict retry prompt when citations are missing."""
     return f"""

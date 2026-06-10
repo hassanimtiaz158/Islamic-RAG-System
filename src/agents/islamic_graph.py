@@ -17,7 +17,10 @@ from src.utils.citation_engine import (
     enforce_citations,
     verify_answer_grounding,
     check_islamic_safety,
+    cross_reference_citations,
+    build_verse_triplets,
 )
+from src.utils.translator import translate_query_to_english, translate_response_to_language
 
 load_dotenv()
 logger = logging.getLogger("islamic-rag")
@@ -38,7 +41,7 @@ def _get_llm():
                 from langchain_openai import ChatOpenAI
                 return ChatOpenAI(
                     model=model or "gpt-4o-mini",
-                    temperature=0.0,  # Zero temperature for factual accuracy
+                    temperature=0.0,
                     api_key=api_key,
                 )
             except Exception as e:
@@ -79,23 +82,67 @@ def _get_llm():
 
 
 # ═══════════════════════════════════════════════
+# LANGUAGE INSTRUCTIONS (for synthesis prompt)
+# ═══════════════════════════════════════════════
+LANGUAGE_INSTRUCTIONS = {
+    "en": "",
+    "ar": """
+═══════════════════════════════════════
+LANGUAGE INSTRUCTION — ARABIC
+═══════════════════════════════════════
+- Respond in formal Modern Standard Arabic (الفصحى)
+- Use Arabic script for all text
+- Keep Quran verses in their original Arabic text
+- Keep Hadith references in their original Arabic text with translation
+- Use Arabic punctuation: ، for commas, ؛ for semicolons, ۔ for periods
+- Maintain citation format in brackets: [القرآن ...], [البخاري ...], [مسلم ...]
+""",
+    "ur": """
+═══════════════════════════════════════
+LANGUAGE INSTRUCTION — URDU
+═══════════════════════════════════════
+- Respond in Urdu (اردو)
+- Use Nastaliq-style Urdu script for all text
+- Keep Quran verses in their original Arabic script (with Urdu translation in parentheses if needed)
+- Keep Hadith text in Arabic with Urdu explanation
+- Maintain citation format in brackets: [قرآن ...], [بخاری ...], [مسلم ...]
+- Use Urdu punctuation: ، for commas, ۔ for periods
+""",
+}
+
+
+# ═══════════════════════════════════════════════
 # SYNTHESIS PROMPT — ZERO-HALLUCINATION
 # ═══════════════════════════════════════════════
 SYNTHESIS_PROMPT = """\
-You are Al-Ilm, an Islamic knowledge assistant. Your task is to answer questions using ONLY the provided Islamic sources.
+You are Al-Ilm, an Islamic knowledge assistant. Answer the question using ONLY the provided Islamic sources.
 
 ═══════════════════════════════════════
-CRITICAL RULES — VIOLATION = REJECTION
+OUTPUT FORMAT — FOLLOW EXACTLY
 ═══════════════════════════════════════
 
-1. USE ONLY PROVIDED SOURCES
-   • Every claim must come from the sources below.
-   • NEVER use your own knowledge, even if you "know" the answer.
-   • If a fact is not in the sources, do NOT include it.
+Structure your answer using these sections (ONLY include sections that have supporting sources — omit sections with no data):
 
-2. CITATION FORMAT (MANDATORY — PERFECT ACCURACY REQUIRED)
-   Each citation MUST match one from the sources below EXACTLY.
+## Summary
+[2-3 sentence direct answer to the question]
 
+## From the Quran
+[Each point with a citation — use exact citation format below]
+
+## From the Hadith
+[Each point with a citation — use exact citation format below]
+
+## Practical Guidance
+[What Muslims should do based on these sources]
+
+## Key Takeaways
+[2-4 bullet points summarizing the core teachings]
+
+═══════════════════════════════════════
+CITATION RULES — ZERO TOLERANCE
+═══════════════════════════════════════
+
+1. EXACT FORMAT (DO NOT MODIFY):
    Quran:     [Quran SurahName Chapter:Verse]
               Example: [Quran Al-Baqarah 2:153]
 
@@ -107,31 +154,20 @@ CRITICAL RULES — VIOLATION = REJECTION
    Tafsir:    [Tafsir Source Reference]
               Example: [Tafsir Ibn Kathir 2:153]
 
-3. EVERY SENTENCE WITH A FACTUAL CLAIM MUST END WITH A CITATION.
-   • If you cannot cite it, DELETE it.
-   • NEVER write "Ayah:2-3" or ranges.
+2. EVERY factual sentence MUST end with a citation.
+   • If you cannot cite it, DELETE the entire sentence.
+   • NEVER write citation ranges like "Ayah:2-3".
    • NEVER use parentheses inside citations.
-   • NEVER modify citation formatting.
 
-4. INSUFFICIENT SOURCES → ADMIT IT
-   If the sources do NOT contain information to answer the question:
-   → Write: "I could not find sufficient evidence in the available Islamic sources."
-   → Do NOT guess, infer, or fabricate.
+3. INSUFFICIENT SOURCES → ADMIT IT
+   If sources lack information, write:
+   "I could not find sufficient evidence in the available Islamic sources."
+   Do NOT guess or fabricate.
 
-5. DISTINGUISH SOURCE TYPES
-   • For direct Quran quotes: Use [Quran ...] and optionally quote the Arabic
-   • For direct Hadith: Use the exact citation from the source
-   • For scholarly opinions not directly from sources: Preface with
-     "According to scholarly interpretation based on these sources..." and add
-     a safety note recommending consultation with a qualified scholar.
-
-6. SAFETY
-   • NEVER invent Quran references.
-   • NEVER invent Hadith references.
-   • NEVER fabricate scholars or books.
-   • If sources conflict, present both and note the difference.
+4. SAFETY
+   • NEVER invent Quran/Hadith references.
    • For sensitive rulings, add: "Please consult a qualified Islamic scholar."
-
+{language_instructions}
 ═══════════════════════════════════════
 RETRIEVED ISLAMIC SOURCES
 ═══════════════════════════════════════
@@ -143,7 +179,7 @@ QUESTION
 {query}
 
 ═══════════════════════════════════════
-ANSWER (every factual claim MUST end with a citation from above sources):
+STRUCTURED ANSWER:
 ═══════════════════════════════════════
 """
 
@@ -177,6 +213,82 @@ def _build_context_with_citations(retrieved_docs: dict) -> tuple:
 
 
 # ═══════════════════════════════════════════════
+# QUERY TRANSLATION NODE (NEW — PHASE 4)
+# ═══════════════════════════════════════════════
+def translate_query_node(llm):
+    """
+    Translates non-English queries to English for vector search.
+    The vector store has English content, so Urdu/Arabic queries must be translated first.
+    """
+    def node(state: IslamicAgentState) -> Dict[str, Any]:
+        language = state.get("language", "en")
+        original_query = state.get("query", "")
+
+        if language == "en" or not original_query.strip():
+            return {
+                "original_query": original_query,
+                "translated_query": original_query,
+            }
+
+        try:
+            translated = translate_query_to_english(original_query, language, llm)
+            logger.info(
+                f"Query translated ({language} → en): "
+                f"'{original_query[:60]}...' → '{translated[:60]}...'"
+            )
+            return {
+                "original_query": original_query,
+                "translated_query": translated,
+            }
+        except Exception as e:
+            logger.warning(f"Query translation failed: {e}. Using original query.")
+            return {
+                "original_query": original_query,
+                "translated_query": original_query,
+            }
+
+    return node
+
+
+# ═══════════════════════════════════════════════
+# RESPONSE TRANSLATION NODE (NEW — PHASE 4)
+# ═══════════════════════════════════════════════
+def translate_response_node(llm):
+    """
+    Translates the English response back to the user's selected language.
+    Preserves citations and Islamic terminology.
+    """
+    def node(state: IslamicAgentState) -> Dict[str, Any]:
+        language = state.get("language", "en")
+        response = state.get("response", "")
+
+        if language == "en" or not response.strip():
+            return {
+                "response": response,
+                "response_language": language,
+            }
+
+        try:
+            translated = translate_response_to_language(response, language, llm)
+            logger.info(
+                f"Response translated (en → {language}): "
+                f"{len(response)} chars → {len(translated)} chars"
+            )
+            return {
+                "response": translated,
+                "response_language": language,
+            }
+        except Exception as e:
+            logger.warning(f"Response translation failed: {e}. Using English response.")
+            return {
+                "response": response,
+                "response_language": "en",
+            }
+
+    return node
+
+
+# ═══════════════════════════════════════════════
 # UNIFIED RETRIEVER NODE (ENHANCED)
 # ═══════════════════════════════════════════════
 def unified_retriever_node(vector_store: IslamicVectorStore):
@@ -185,14 +297,14 @@ def unified_retriever_node(vector_store: IslamicVectorStore):
         all_scores = {}
 
         routing = state.get("routing", ["quran", "hadith_bukhari"])
-        query = state.get("query", "")
+        # Use translated query for retrieval if available
+        query = state.get("translated_query", state.get("query", ""))
 
-        logger.info(f"Retrieving from collections: {routing}")
+        logger.info(f"Retrieving from collections: {routing} with query: '{query[:60]}...'")
 
         with EMBED_LOCK:
             for col in routing:
                 try:
-                    # Use retrieve_with_scores for threshold filtering
                     scored_docs = vector_store.retrieve_with_scores(
                         col, query=query, k=5
                     )
@@ -224,7 +336,6 @@ def unified_retriever_node(vector_store: IslamicVectorStore):
             {col: [(None, s) for s in scores] for col, scores in all_scores.items() if scores}
         )
 
-        # Check if we have any meaningful results
         total_docs = sum(len(docs) for docs in results.values())
         insufficient = total_docs == 0 or retrieval_confidence < 0.2
 
@@ -245,27 +356,22 @@ def unified_retriever_node(vector_store: IslamicVectorStore):
 
 
 # ═══════════════════════════════════════════════
-# SYNTHESIS NODE (ENHANCED)
+# SYNTHESIS NODE (ENHANCED — LANGUAGE-AWARE)
 # ═══════════════════════════════════════════════
 def synthesis_node(llm):
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         insufficient = state.get("insufficient_evidence", False)
         retrieved_docs = state.get("retrieved_docs", {})
+        language = state.get("language", "en")
 
-        # Build context
         context, source_labels = _build_context_with_citations(retrieved_docs)
 
-        # If no context was retrieved, return early with safe response
         if not context.strip():
+            from src.utils.translator import get_ui_string
             return {
                 "context": "",
                 "context_sources": [],
-                "response": (
-                    "I could not find sufficient evidence in the available Islamic sources "
-                    "to answer this question. Please try rephrasing your question or "
-                    "selecting additional sources. For specific Islamic rulings, "
-                    "please consult a qualified Islamic scholar."
-                ),
+                "response": get_ui_string("insufficient_evidence", language),
                 "citations": [],
                 "citation_cards": [],
                 "citation_valid": False,
@@ -273,10 +379,14 @@ def synthesis_node(llm):
                 "insufficient_evidence": True,
             }
 
-        # Generate answer
+        # Get language-specific instructions
+        lang_instructions = LANGUAGE_INSTRUCTIONS.get(language, "")
+
+        query_for_synthesis = state.get("translated_query", state.get("query", ""))
         prompt = SYNTHESIS_PROMPT.format(
             context=context,
-            query=state["query"],
+            query=query_for_synthesis,
+            language_instructions=lang_instructions,
         )
 
         try:
@@ -286,13 +396,11 @@ def synthesis_node(llm):
             )
         except Exception as e:
             logger.error(f"LLM synthesis failed: {e}")
+            from src.utils.translator import get_ui_string
             return {
                 "context": context,
                 "context_sources": source_labels,
-                "response": (
-                    "I encountered an error generating the answer. "
-                    "Please try again."
-                ),
+                "response": get_ui_string("error_generating", language),
                 "citations": [],
                 "citation_cards": [],
                 "citation_valid": False,
@@ -300,18 +408,17 @@ def synthesis_node(llm):
                 "insufficient_evidence": True,
             }
 
-        # Extract citations
         citations = extract_citations(response_text)
         citation_cards = format_citation_cards(citations)
 
-        # Immediate grounding check (pre-verification)
         is_grounded, unsupported, grounding_confidence = verify_answer_grounding(
             response_text, context, citations
         )
 
         logger.info(
             f"Synthesis complete: {len(citations)} citations, "
-            f"grounded: {is_grounded}, confidence: {grounding_confidence:.2f}"
+            f"grounded: {is_grounded}, confidence: {grounding_confidence:.2f}, "
+            f"language: {language}"
         )
 
         return {
@@ -328,34 +435,26 @@ def synthesis_node(llm):
 
 
 # ═══════════════════════════════════════════════
-# VERIFICATION NODE (NEW)
+# VERIFICATION NODE
 # ═══════════════════════════════════════════════
 def verification_node():
-    """
-    Dedicated verification step that runs between synthesis and citation enforcement.
-    Checks grounding, Islamic safety, and flags issues.
-    """
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         response = state.get("response", "")
         context = state.get("context", "")
         citations_raw = extract_citations(response)
 
-        # Run grounding verification
         is_grounded, unsupported, grounding_confidence = verify_answer_grounding(
             response, context, citations_raw
         )
 
-        # Run Islamic safety check
         safety_flags = check_islamic_safety(response, citations_raw)
 
-        # Determine source types
         source_types = list(set(c.get("source", "unknown") for c in citations_raw))
         if not source_types and is_grounded:
             source_types = ["retrieved_context"]
         elif not source_types:
             source_types = ["none"]
 
-        # Combine confidence scores
         retrieval_confidence = state.get("retrieval_confidence", 0.5)
         synthesis_confidence = state.get("confidence_score", 0.5)
         final_confidence = (
@@ -382,52 +481,154 @@ def verification_node():
 
 
 # ═══════════════════════════════════════════════
-# RESPONSE FINALIZATION NODE (NEW)
+# FACT-CHECK NODE — Cross-references citations against context
 # ═══════════════════════════════════════════════
-def finalization_node():
+def fact_check_node():
     """
-    Final node that applies post-verification adjustments:
-    - Adds scholarly disclaimers for sensitive topics
-    - Overrides response if verification completely failed
+    Cross-references every citation in the response against the actual
+    retrieved context. Flags hallucinated citations.
     """
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         response = state.get("response", "")
-        verification_passed = state.get("verification_passed", False)
-        safety_flags = state.get("safety_flags", [])
-        confidence = state.get("confidence_score", 0.0)
-        insufficient = state.get("insufficient_evidence", False)
-        citations = state.get("citations", [])
+        context = state.get("context", "")
+        citations = extract_citations(response)
 
-        # If no evidence at all and no citations, override completely
-        if insufficient and not citations:
-            response = (
-                "I could not find sufficient evidence in the available Islamic sources "
-                "to answer this question. Please try rephrasing your question or "
-                "selecting additional sources. For specific Islamic rulings, "
-                "please consult a qualified Islamic scholar."
+        verdicts, hallucination_ratio, fact_check_passed = cross_reference_citations(
+            response, context, citations
+        )
+
+        logger.info(
+            f"Fact-check: {len(verdicts)} citations checked, "
+            f"hallucination_ratio={hallucination_ratio}, "
+            f"passed={fact_check_passed}"
+        )
+
+        # If more than 50% of citations are hallucinated, prepend a warning
+        updated_response = response
+        if not fact_check_passed:
+            updated_response = (
+                "⚠️ **Note:** Some citations in this answer could not be "
+                "verified against the retrieved sources. Please verify "
+                "independently or consult a qualified scholar.\n\n" + response
             )
-            confidence = 0.0
-
-        # Add disclaimer for sensitive topics
-        elif "sensitive_topic" in safety_flags and "scholarly_opinion" not in state.get("source_types", []):
-            response += (
-                "\n\n⚠️ **Important Note:** This topic involves nuanced Islamic rulings. "
-                "The information above is based on the retrieved sources. "
-                "For personal religious obligations (farāḍ, ḥarām, ḥalāl), "
-                "please consult a qualified Islamic scholar who can consider "
-                "your specific circumstances."
+            logger.warning(
+                f"High hallucination ratio ({hallucination_ratio}): "
+                f"citations may be fabricated"
             )
 
         return {
-            "response": response,
-            "confidence_score": confidence,
+            "citation_verdicts": verdicts,
+            "hallucination_ratio": hallucination_ratio,
+            "fact_check_passed": fact_check_passed,
+            "response": updated_response,
         }
 
     return node
 
 
 # ═══════════════════════════════════════════════
-# BUILD GRAPH
+# FOLLOW-UP SUGGESTIONS NODE
+# ═══════════════════════════════════════════════
+def suggest_followups_node(llm):
+    """
+    Generates 3 relevant follow-up questions based on the Q&A.
+    Gracefully degrades to empty list on any failure.
+    """
+    FOLLOWUP_PROMPT = """\
+Based on the following Islamic Q&A, suggest 3 natural follow-up questions a user might ask.
+Make them specific, concise, and related to the topic. Output ONLY a JSON array of strings.
+
+Question: {query}
+Answer: {response}
+
+Follow-up questions (JSON array):
+"""
+
+    def node(state: IslamicAgentState) -> Dict[str, Any]:
+        response = state.get("response", "")
+        query = state.get("query", "")
+
+        if not response.strip() or not query.strip():
+            return {"follow_up_questions": []}
+
+        try:
+            prompt = FOLLOWUP_PROMPT.format(
+                query=query[:300],
+                response=response[:500],
+            )
+            raw = llm.invoke(prompt)
+            raw_text = raw.content if hasattr(raw, "content") else str(raw)
+
+            # Parse JSON array from response
+            # Try to find a JSON array in the text
+            array_match = re.search(r"\[.*?\]", raw_text, re.DOTALL)
+            if array_match:
+                questions = json.loads(array_match.group(0))
+                if isinstance(questions, list):
+                    # Sanitize: limit to 3, ensure strings
+                    questions = [
+                        str(q).strip()
+                        for q in questions[:3]
+                        if str(q).strip()
+                    ]
+                    return {"follow_up_questions": questions}
+
+            logger.warning("Follow-up questions: could not parse JSON array")
+            return {"follow_up_questions": []}
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Follow-up questions JSON parse failed: {e}")
+            return {"follow_up_questions": []}
+        except Exception as e:
+            logger.warning(f"Follow-up generation failed: {e}")
+            return {"follow_up_questions": []}
+
+    return node
+
+
+# ═══════════════════════════════════════════════
+# RESPONSE FINALIZATION NODE (LANGUAGE-AWARE)
+# ═══════════════════════════════════════════════
+def finalization_node():
+    def node(state: IslamicAgentState) -> Dict[str, Any]:
+        from src.utils.translator import get_ui_string
+
+        response = state.get("response", "")
+        verification_passed = state.get("verification_passed", False)
+        safety_flags = state.get("safety_flags", [])
+        confidence = state.get("confidence_score", 0.0)
+        insufficient = state.get("insufficient_evidence", False)
+        citations = state.get("citations", [])
+        language = state.get("language", "en")
+
+        if insufficient and not citations:
+            response = get_ui_string("insufficient_evidence", language)
+            confidence = 0.0
+
+        elif "sensitive_topic" in safety_flags and "scholarly_opinion" not in state.get("source_types", []):
+            response += get_ui_string("scholar_disclaimer", language)
+
+        # Build verse triplets for Quran citations (Arabic/English/Urdu display)
+        context = state.get("context", "")
+        all_citations = extract_citations(response)
+        verse_triplets = build_verse_triplets(all_citations, context)
+
+        return {
+            "response": response,
+            "confidence_score": confidence,
+            "verse_triplets": verse_triplets,
+        }
+
+    return node
+
+
+# ═══════════════════════════════════════════════
+# BUILD GRAPH — 11-STEP PIPELINE
+# ═══════════════════════════════════════════════
+# Pipeline:
+#   classifier → translate_query → retriever → synthesis → verify
+#   → fact_check → enforce_citations → finalize → suggest_followups
+#   → translate_response → END
 # ═══════════════════════════════════════════════
 def build_islamic_graph(vector_store: IslamicVectorStore):
     try:
@@ -438,21 +639,29 @@ def build_islamic_graph(vector_store: IslamicVectorStore):
 
     graph = StateGraph(IslamicAgentState)
 
-    # Nodes — 7-step pipeline
+    # Nodes — 11-step pipeline
     graph.add_node("classifier", lambda state: classifier_node(state, llm))
+    graph.add_node("translate_query", translate_query_node(llm))
     graph.add_node("retriever", unified_retriever_node(vector_store))
     graph.add_node("synthesis", synthesis_node(llm))
     graph.add_node("verify", verification_node())
+    graph.add_node("fact_check", fact_check_node())
     graph.add_node("enforce_citations", lambda state: enforce_citations(state, llm))
     graph.add_node("finalize", finalization_node())
+    graph.add_node("suggest_followups", suggest_followups_node(llm))
+    graph.add_node("translate_response", translate_response_node(llm))
 
     # Flow
     graph.set_entry_point("classifier")
-    graph.add_edge("classifier", "retriever")
+    graph.add_edge("classifier", "translate_query")
+    graph.add_edge("translate_query", "retriever")
     graph.add_edge("retriever", "synthesis")
     graph.add_edge("synthesis", "verify")
-    graph.add_edge("verify", "enforce_citations")
+    graph.add_edge("verify", "fact_check")
+    graph.add_edge("fact_check", "enforce_citations")
     graph.add_edge("enforce_citations", "finalize")
-    graph.add_edge("finalize", END)
+    graph.add_edge("finalize", "suggest_followups")
+    graph.add_edge("suggest_followups", "translate_response")
+    graph.add_edge("translate_response", END)
 
     return graph.compile()

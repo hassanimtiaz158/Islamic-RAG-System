@@ -758,6 +758,22 @@ body::before {
   text-align: right;
 }
 
+/* Urdu / RTL bubble (Phase 4) */
+.bubble-urdu {
+  direction: rtl;
+  font-family: 'Noto Nastaliq Urdu', 'Amiri', serif;
+  font-size: 17px;
+  line-height: 2.4;
+  text-align: right;
+  letter-spacing: 0;
+}
+
+/* Assistant bubble RTL override */
+.msg-assistant .bubble-arabic,
+.msg-assistant .bubble-urdu {
+  border-radius: 16px 16px 16px 4px;
+}
+
 /* ═══════════════════════════════════════════════
    VERSE DISPLAY
 ═══════════════════════════════════════════════ */
@@ -797,6 +813,128 @@ body::before {
   font-size: 11px;
   color: var(--green-light);
   letter-spacing: 0.08em;
+}
+
+/* ═══ VERSE TRIPLET — Arabic + English + Urdu ═══ */
+.verse-triplet-wrapper {
+  margin-top: 10px;
+}
+
+.verse-triplet {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  background: var(--green-subtle);
+  border: 1px solid rgba(26, 92, 56, 0.12);
+  border-radius: 10px;
+  padding: 12px;
+  transition: opacity 0.3s ease;
+}
+
+.verse-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 8px;
+}
+
+[data-theme="dark"] .verse-col {
+  background: rgba(20, 26, 20, 0.6);
+}
+
+.verse-lang-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.verse-col .verse-text {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.verse-col-arabic .verse-text {
+  font-family: 'Amiri', serif;
+  font-size: 20px;
+  line-height: 2;
+  color: var(--green-deep);
+  direction: rtl;
+  text-align: right;
+}
+
+[data-theme="dark"] .verse-col-arabic .verse-text {
+  color: var(--gold-light);
+}
+
+.verse-col-urdu .verse-text {
+  font-family: 'Noto Nastaliq Urdu', 'Amiri', serif;
+  font-size: 16px;
+  line-height: 2.2;
+  direction: rtl;
+  text-align: right;
+}
+
+.verse-triplet-ref {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--green-light);
+  letter-spacing: 0.08em;
+  margin-top: 6px;
+  padding-left: 4px;
+}
+
+/* ═══ FOLLOW-UP QUESTION CHIPS ═══ */
+.followup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0 4px;
+}
+
+.followup-chip {
+  background: var(--gold-pale, #fdf6e3);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 13px;
+  color: var(--green-rich, #0d2818);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.followup-chip:hover {
+  background: var(--gold, #c9a84c);
+  color: var(--green-deep, #0d2818);
+  border-color: var(--gold, #c9a84c);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(201, 168, 76, 0.2);
+}
+
+[data-theme="dark"] .followup-chip {
+  background: rgba(201, 168, 76, 0.1);
+  color: var(--gold-light);
+}
+
+[data-theme="dark"] .followup-chip:hover {
+  background: var(--gold, #c9a84c);
+  color: var(--green-deep, #0d2818);
+}
+
+/* ═══ RESPONSIVE ═══ */
+@media (max-width: 768px) {
+  .verse-triplet {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ═══════════════════════════════════════════════

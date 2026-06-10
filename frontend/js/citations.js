@@ -197,6 +197,158 @@ async function lookupVerseArabic(surah, ayah) {
   }
 }
 
+// ═══════════════════════════════════════════════
+// VERSE TRIPLET — Arabic + English + Urdu display
+// ═══════════════════════════════════════════════
+
+/**
+ * Fetch a verse in all three languages (Arabic, English, Urdu).
+ * Uses AlQuran.cloud for Arabic/English, and backend /api/translate-verse for Urdu.
+ * Results are cached keyed by "surah:ayah".
+ *
+ * @param {number|string} surah
+ * @param {number|string} ayah
+ * @returns {Promise<{arabic: string, english: string, urdu: string}>}
+ */
+async function fetchVerseTriplet(surah, ayah) {
+  const cacheKey = `${surah}:${ayah}`;
+
+  // Check if we already have all three languages cached
+  if (verseCache[cacheKey] && verseCache[cacheKey].arabic && verseCache[cacheKey].english && verseCache[cacheKey].urdu) {
+    return verseCache[cacheKey];
+  }
+
+  const result = { arabic: '', english: '', urdu: '' };
+
+  try {
+    // Fetch Arabic and English in parallel
+    const [arabicRes, englishRes] = await Promise.all([
+      fetch(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}`),
+      fetch(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}/en.yusufali`),
+    ]);
+
+    if (arabicRes.ok) {
+      const data = await arabicRes.json();
+      if (data.code === 200 && data.data) {
+        result.arabic = data.data.text;
+      }
+    }
+
+    if (englishRes.ok) {
+      const data = await englishRes.json();
+      if (data.code === 200 && data.data) {
+        result.english = data.data.text;
+      }
+    }
+
+    // Fetch Urdu translation from backend
+    if (result.english) {
+      try {
+        const urduRes = await fetch(`${window.__API_BASE__ || ''}/api/translate-verse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: result.english, target_lang: 'ur' }),
+        });
+        if (urduRes.ok) {
+          const urduData = await urduRes.json();
+          result.urdu = urduData.translated || '';
+        }
+      } catch (urduErr) {
+        console.warn('[TRIPLET] Urdu translation fetch failed:', urduErr);
+      }
+    }
+  } catch (e) {
+    console.warn('[TRIPLET] Failed to fetch verse triplet:', e);
+  }
+
+  // Cache the result
+  verseCache[cacheKey] = { ...verseCache[cacheKey], ...result };
+
+  return result;
+}
+
+/**
+ * Build side-by-side Arabic/English/Urdu verse display for all Quran citations.
+ * @param {{ type:string, raw:string, ref:string }[]} citations
+ * @returns {string} HTML string with triplet cards
+ */
+function buildVerseTripletDisplay(citations) {
+  const quranCites = citations.filter(c => c.type === 'quran');
+  if (!quranCites.length) return '';
+
+  const containers = quranCites.map(cite => {
+    // Extract surah and ayah from citation like [Quran Al-Baqarah 2:153]
+    const match = cite.raw.match(/(\d+):(\d+)/);
+    if (!match) return '';
+
+    const surah = match[1];
+    const ayah = match[2];
+    const cacheKey = `${surah}:${ayah}`;
+    const cached = verseCache[cacheKey];
+
+    // If fully cached, render immediately
+    if (cached && cached.arabic && cached.english) {
+      return renderTripletCard(surah, ayah, cached.arabic, cached.english, cached.urdu || '', cite.ref || cite.raw, true);
+    }
+
+    // Otherwise render loading card and trigger async fetch
+    fetchVerseTriplet(surah, ayah).then(triplet => {
+      updateTripletCard(surah, ayah, triplet);
+    });
+
+    return renderTripletCard(surah, ayah, '', '', '', cite.ref || cite.raw, false);
+  });
+
+  return containers.filter(Boolean).join('');
+}
+
+/**
+ * Render a single triplet card HTML.
+ */
+function renderTripletCard(surah, ayah, arabic, english, urdu, ref, isReady) {
+  const opacityStyle = isReady ? '' : 'opacity:0.4;';
+  return `
+    <div class="verse-triplet-wrapper" data-triplet-key="${surah}:${ayah}">
+      <div class="verse-triplet" style="${!isReady ? 'opacity:0.5;' : ''}">
+        <div class="verse-col verse-col-arabic" dir="rtl">
+          <div class="verse-lang-label">العربية</div>
+          <div class="verse-text verse-arabic-text">${arabic || 'جاري التحميل…'}</div>
+        </div>
+        <div class="verse-col verse-col-english">
+          <div class="verse-lang-label">English</div>
+          <div class="verse-text verse-english-text">${english || 'Loading…'}</div>
+        </div>
+        <div class="verse-col verse-col-urdu" dir="rtl">
+          <div class="verse-lang-label">اردو</div>
+          <div class="verse-text verse-urdu-text">${urdu || 'لوڈ ہو رہا ہے…'}</div>
+        </div>
+      </div>
+      <div class="verse-triplet-ref">${ref.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+    </div>
+  `;
+}
+
+/**
+ * Update a triplet card in the DOM after async fetch completes.
+ */
+function updateTripletCard(surah, ayah, triplet) {
+  const key = `${surah}:${ayah}`;
+  const wrapper = document.querySelector(`.verse-triplet-wrapper[data-triplet-key="${key}"]`);
+  if (!wrapper) return;
+
+  const card = wrapper.querySelector('.verse-triplet');
+  if (card) card.style.opacity = '';
+
+  const arabicEl = wrapper.querySelector('.verse-arabic-text');
+  const englishEl = wrapper.querySelector('.verse-english-text');
+  const urduEl = wrapper.querySelector('.verse-urdu-text');
+
+  if (arabicEl && triplet.arabic) arabicEl.textContent = triplet.arabic;
+  if (englishEl && triplet.english) englishEl.textContent = triplet.english;
+  if (urduEl && triplet.urdu) urduEl.textContent = triplet.urdu;
+  else if (urduEl && !triplet.urdu) urduEl.textContent = 'Translation unavailable';
+}
+
 /**
  * Render citation cards into the sidebar.
  * @param {{ raw:string, type:string, ref:string, url:string }[]} citations

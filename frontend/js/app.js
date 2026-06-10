@@ -20,12 +20,41 @@ let ws                  = null;
 let reconnectTimer      = null;
 let _streamBubble       = null;
 let _streamMeta         = {};  // metadata for current stream (confidence, verification, etc.)
+let currentConversationId = null;  // multi-turn conversation session ID
+
+/* ── Multilingual UI strings (Phase 4) ── */
+const UI_STRINGS = {
+  generating: { en: 'Generating answer…', ar: 'جاري إنشاء الإجابة…', ur: 'جواب تیار کیا جا رہا ہے…' },
+  connecting: { en: 'Connecting to backend…', ar: 'جاري الاتصال بالخادم…', ur: 'بیک اینڈ سے رابطہ کیا جا رہا ہے…' },
+  connected:  { en: 'Connected to backend', ar: 'متصل بالخادم', ur: 'بیک اینڈ سے منسلک' },
+  disconnected: { en: 'Backend unavailable — using local knowledge', ar: 'الخادم غير متاح — استخدام المعرفة المحلية', ur: 'بیک اینڈ دستیاب نہیں — مقامی علم کا استعمال' },
+  no_citations: { en: 'No citations found — using general knowledge', ar: 'لم يتم العثور على استشهادات — استخدام المعرفة العامة', ur: 'کوئی حوالے نہیں ملے — عام علم کا استعمال' },
+  cited_sources: { en: 'Cited — {n} source{s}', ar: 'مستشهد — {n} مصدر{s}', ur: 'حوالہ دیا گیا — {n} ذریعہ{s}' },
+  verified:   { en: 'Verified', ar: 'تم التحقق', ur: 'تصدیق شدہ' },
+  not_verified: { en: 'Not verified', ar: 'لم يتم التحقق', ur: 'تصدیق نہیں ہوئی' },
+  confidence: { en: 'confidence', ar: 'ثقة', ur: 'اعتماد' },
+  sensitive_topic: { en: 'Sensitive topic — please consult a qualified scholar', ar: 'موضوع حساس — يرجى استشارة عالم مؤهل', ur: 'حساس موضوع — براہ کرم ایک مستند عالم سے مشورہ کریں' },
+  chat_cleared: { en: 'Chat cleared', ar: 'تم مسح المحادثة', ur: 'چیٹ صاف کر دی گئی' },
+  copied:     { en: 'Copied to clipboard', ar: 'تم النسخ إلى الحافظة', ur: 'کلپ بورڈ پر کاپی ہو گیا' },
+  feedback_thanks: { en: 'Thanks for your feedback!', ar: 'شكرًا لتعليقاتك!', ur: 'آپ کے فیڈبیک کا شکریہ!' },
+  feedback_improve: { en: "Thanks — we'll work on improving!", ar: 'شكرًا — سنعمل على التحسين!', ur: 'شکریہ — ہم بہتری پر کام کریں گے!' },
+};
+
+function getUiString(key, n) {
+  const entry = UI_STRINGS[key] || {};
+  let text = entry[currentLang] || entry.en || key;
+  if (n !== undefined) {
+    text = text.replace('{n}', n).replace('{s}', n !== 1 ? (currentLang === 'ar' ? 'ات' : (currentLang === 'ur' ? 'یں' : 's')) : '');
+  }
+  return text;
+}
 
 /* ═══════════════════════════════════════════════
    INIT
 ═══════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
   restoreTheme();
+  restoreLang();
   restoreChatHistory();
   connectWebSocket();
 
@@ -109,7 +138,8 @@ function restoreChatHistory() {
 }
 
 function clearChat() {
-  if (!confirm('Clear all chat messages?')) return;
+  const confirmMsg = currentLang === 'ar' ? 'مسح جميع الرسائل؟' : (currentLang === 'ur' ? 'تمام پیغامات صاف کریں؟' : 'Clear all chat messages?');
+  if (!confirm(confirmMsg)) return;
   const msgs = document.getElementById('chatMessages');
   msgs.querySelectorAll('.msg').forEach(el => el.remove());
   const list = document.getElementById('citationsList');
@@ -118,7 +148,7 @@ function clearChat() {
   document.getElementById('citationsEmpty').classList.remove('hidden');
   document.getElementById('welcomeScreen').classList.remove('hidden');
   localStorage.removeItem(STORAGE_KEY);
-  showToast('Chat cleared');
+  showToast(getUiString('chat_cleared'));
 }
 
 /* ═══════════════════════════════════════════════
@@ -190,8 +220,9 @@ function scheduleReconnect() {
 
 function handleStreamError(message) {
   removeTypingIndicator();
+  const retryMsg = currentLang === 'ar' ? 'يرجى إعادة صياغة سؤالك أو اختيار مصادر مختلفة.' : (currentLang === 'ur' ? 'براہ کرم اپنا سوال دوبارہ لکھیں یا مختلف ذرائع منتخب کریں۔' : 'Please try rephrasing your question or select different sources.');
   addAssistantBubble(
-    `⚠️ ${message}\n\nPlease try rephrasing your question or select different sources.`,
+    `⚠️ ${message}\n\n${retryMsg}`,
     [], false
   );
   isLoading = false;
@@ -209,6 +240,24 @@ function appendStreamToken(token) {
     content.textContent += token;
     scrollBottom();
   }
+}
+
+function renderFollowUpChips(container, questions) {
+  const chipsDiv = document.createElement('div');
+  chipsDiv.className = 'followup-chips';
+  questions.forEach(q => {
+    const chip = document.createElement('button');
+    chip.className = 'followup-chip';
+    chip.textContent = q;
+    chip.addEventListener('click', () => {
+      const input = document.getElementById('queryInput');
+      input.value = q;
+      input.dispatchEvent(new Event('input'));
+      sendQuery();
+    });
+    chipsDiv.appendChild(chip);
+  });
+  container.appendChild(chipsDiv);
 }
 
 function finalizeStreamResponse(msg) {
@@ -229,12 +278,22 @@ function finalizeStreamResponse(msg) {
           }))
         : extractCitations(text);
 
-      // Verse display
+      // Capture conversation ID for multi-turn
+      if (msg.conversation_id) {
+        currentConversationId = msg.conversation_id;
+      }
+
+      // Verse display (Arabic + English + Urdu triplet)
       const verseEl = _streamBubble.querySelector('.verse-slot');
-      if (verseEl) verseEl.innerHTML = buildVerseDisplay(citations);
+      if (verseEl) verseEl.innerHTML = buildVerseDisplay(citations) + buildVerseTripletDisplay(citations);
 
       // Update meta badge with enhanced info
       updateMetaBadge(msg, citations);
+
+      // Follow-up question chips
+      if (msg.follow_up_questions && msg.follow_up_questions.length > 0) {
+        renderFollowUpChips(_streamBubble, msg.follow_up_questions);
+      }
 
       renderCitationCards(citations);
       addMsgActions(_streamBubble);
@@ -273,6 +332,7 @@ async function sendQuery() {
       query,
       language: currentLang,
       sources,
+      conversation_id: currentConversationId || '',
     }));
     return;
   }
@@ -283,7 +343,7 @@ async function sendQuery() {
     const res = await fetch(`${API_BASE}/api/ask`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, language: currentLang, sources }),
+      body: JSON.stringify({ query, language: currentLang, sources, conversation_id: currentConversationId || '' }),
     });
 
     if (!res.ok) {
@@ -295,6 +355,11 @@ async function sendQuery() {
     const answer   = data.answer || data.response || '';
     const citCards = data.citation_cards || [];
 
+    // Capture conversation ID for multi-turn
+    if (data.conversation_id) {
+      currentConversationId = data.conversation_id;
+    }
+
     const citations = citCards.length
       ? citCards.map(c => ({
           type: (c.source || 'hadith').toLowerCase(),
@@ -304,8 +369,15 @@ async function sendQuery() {
         }))
       : extractCitations(answer);
 
+    // Build enhanced meta with new fields
+    const enhancedData = {
+      ...data,
+      follow_up_questions: data.follow_up_questions || [],
+      verse_triplets: data.verse_triplets || [],
+    };
+
     removeTypingIndicator();
-    addAssistantBubbleEnhanced(answer, citations, data);
+    addAssistantBubbleEnhanced(answer, citations, enhancedData, data.follow_up_questions || [], data.verse_triplets || []);
     renderCitationCards(citations);
     setStatus('online', 'Connected to backend');
 
@@ -408,7 +480,7 @@ function createAssistantBubble() {
       <div class="verse-slot"></div>
     </div>
     <div class="meta-row">
-      <div class="cite-badge invalid"><span></span>Generating answer…</div>
+      <div class="cite-badge invalid"><span></span>${getUiString('generating')}</div>
       <div class="confidence-indicator" style="display:none">
         <div class="confidence-bar">
           <div class="confidence-fill"></div>
@@ -436,18 +508,29 @@ function addAssistantBubble(text, citations, valid) {
   });
 }
 
-function addAssistantBubbleEnhanced(text, citations, meta) {
+function addAssistantBubbleEnhanced(text, citations, meta, followUps, verseTriplets) {
   const msgs = document.getElementById('chatMessages');
   const div  = document.createElement('div');
   div.className = 'msg msg-assistant fade-in';
 
+  const lang = meta.language || currentLang;
+  const isRTL = lang === 'ar' || lang === 'ur';
+  const bubbleClass = lang === 'ur' ? 'bubble-urdu' : (lang === 'ar' ? 'bubble-arabic' : '');
+
   const highlighted = highlightCitations(escapeHtml(text));
-  const verseHtml   = buildVerseDisplay(citations);
+  const verseHtml   = buildVerseDisplay(citations) + buildVerseTripletDisplay(citations);
   const isValid = meta.citation_valid !== undefined ? meta.citation_valid : citations.length > 0;
   const confidence = meta.confidence_score || 0;
 
+  // Follow-up question chips
+  const followUpHtml = (followUps && followUps.length > 0)
+    ? `<div class="followup-chips">${followUps.map(q =>
+        `<button class="followup-chip" onclick="(function(){document.getElementById('queryInput').value='${q.replace(/'/g, "\\'")}';document.getElementById('queryInput').dispatchEvent(new Event('input'));sendQuery();})()">${escapeHtml(q)}</button>`
+      ).join('')}</div>`
+    : '';
+
   div.innerHTML = `
-    <div class="bubble bubble-assistant">
+    <div class="bubble bubble-assistant ${bubbleClass}" dir="${isRTL ? 'rtl' : 'ltr'}">
       <span class="bubble-content">${highlighted}</span>
       ${verseHtml}
     </div>
@@ -455,27 +538,28 @@ function addAssistantBubbleEnhanced(text, citations, meta) {
       <div class="cite-badge ${isValid ? 'valid' : 'invalid'}">
         <span></span>
         ${isValid
-          ? `Cited — ${citations.length} source${citations.length !== 1 ? 's' : ''}`
-          : 'No citations found — using general knowledge'}
+          ? getUiString('cited_sources', citations.length)
+          : getUiString('no_citations')}
       </div>
       <div class="confidence-indicator">
         <div class="confidence-bar">
           <div class="confidence-fill" style="width: ${confidence * 100}%"></div>
         </div>
-        <span class="confidence-label">${Math.round(confidence * 100)}% confidence</span>
+        <span class="confidence-label">${Math.round(confidence * 100)}% ${getUiString('confidence')}</span>
       </div>
     </div>
     <div class="verification-row" style="${meta.verification_passed === undefined ? 'display:none' : ''}">
       <span class="verification-badge ${meta.verification_passed ? 'passed' : 'failed'}">
-        ${meta.verification_passed ? '✓ Verified' : '⚠ Not verified'}
+        ${meta.verification_passed ? '✓ ' + getUiString('verified') : '⚠ ' + getUiString('not_verified')}
       </span>
       <div class="source-types">
         ${(meta.source_types || []).map(st => `<span class="source-type-tag ${st}">${st.replace(/_/g, ' ')}</span>`).join('')}
       </div>
     </div>
     ${(meta.safety_flags || []).includes('sensitive_topic')
-      ? '<div class="safety-notice">⚠️ Sensitive topic — please consult a qualified scholar</div>'
+      ? `<div class="safety-notice">⚠️ ${getUiString('sensitive_topic')}</div>`
       : ''}
+    ${followUpHtml}
   `;
 
   msgs.appendChild(div);
@@ -492,8 +576,8 @@ function updateMetaBadge(msg, citations) {
     const valid = citations.length > 0;
     badge.className = `cite-badge ${valid ? 'valid' : 'invalid'}`;
     badge.innerHTML = `<span></span>${valid
-      ? `Cited — ${citations.length} source${citations.length !== 1 ? 's' : ''}`
-      : 'No citations found — using general knowledge'}`;
+      ? getUiString('cited_sources', citations.length)
+      : getUiString('no_citations')}`;
   }
 
   // Confidence bar
@@ -504,7 +588,7 @@ function updateMetaBadge(msg, citations) {
     const label = confIndicator.querySelector('.confidence-label');
     const score = msg.confidence_score || 0;
     if (fill) fill.style.width = `${score * 100}%`;
-    if (label) label.textContent = `${Math.round(score * 100)}% confidence`;
+    if (label) label.textContent = `${Math.round(score * 100)}% ${getUiString('confidence')}`;
   }
 
   // Verification row
@@ -515,7 +599,7 @@ function updateMetaBadge(msg, citations) {
     const srcTypes = verifyRow.querySelector('.source-types');
     if (vBadge) {
       vBadge.className = `verification-badge ${msg.verification_passed ? 'passed' : 'failed'}`;
-      vBadge.textContent = msg.verification_passed ? '✓ Verified against sources' : '⚠ Could not fully verify';
+      vBadge.textContent = msg.verification_passed ? '✓ ' + getUiString('verified') : '⚠ ' + getUiString('not_verified');
     }
     if (srcTypes) {
       srcTypes.innerHTML = (msg.source_types || [])
@@ -531,7 +615,7 @@ function updateMetaBadge(msg, citations) {
     if (!existing) {
       const notice = document.createElement('div');
       notice.className = 'safety-notice';
-      notice.innerHTML = '⚠️ Sensitive topic — please consult a qualified scholar';
+      notice.innerHTML = '⚠️ ' + getUiString('sensitive_topic');
       _streamBubble.appendChild(notice);
     }
   }
@@ -552,7 +636,7 @@ function addMsgActions(msgDiv) {
   copyBtn.onclick = () => {
     const text = msgDiv.querySelector('.bubble-content')?.textContent || '';
     navigator.clipboard.writeText(text).then(() => {
-      showToast('Copied to clipboard');
+      showToast(getUiString('copied'));
     }).catch(() => {
       const ta = document.createElement('textarea');
       ta.value = text;
@@ -560,7 +644,7 @@ function addMsgActions(msgDiv) {
       ta.select();
       document.execCommand('copy');
       ta.remove();
-      showToast('Copied to clipboard');
+      showToast(getUiString('copied'));
     });
   };
 
@@ -575,7 +659,7 @@ function addMsgActions(msgDiv) {
     thumbsUpBtn.dataset.feedbackGiven = 'true';
     thumbsUpBtn.style.background = 'rgba(26, 92, 56, 0.15)';
     thumbsUpBtn.style.borderColor = 'var(--green-rich)';
-    showToast('Thanks for your feedback!');
+    showToast(getUiString('feedback_thanks'));
   };
 
   // Feedback: Thumbs Down
@@ -589,7 +673,7 @@ function addMsgActions(msgDiv) {
     thumbsDownBtn.dataset.feedbackGiven = 'true';
     thumbsDownBtn.style.background = 'rgba(180, 60, 40, 0.12)';
     thumbsDownBtn.style.borderColor = '#b43c28';
-    showToast('Thanks — we\'ll work on improving!');
+    showToast(getUiString('feedback_improve'));
   };
 
   actions.appendChild(copyBtn);
@@ -678,6 +762,29 @@ function toggleSources() {
   document.getElementById('sourcesPanel').classList.toggle('open');
 }
 
+function restoreLang() {
+  const saved = localStorage.getItem('alilm-lang');
+  if (saved && ['en', 'ar', 'ur'].includes(saved)) {
+    currentLang = saved;
+    const btn = document.querySelector(`.lang-btn[data-lang="${saved}"]`);
+    if (btn) {
+      document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const input = document.getElementById('queryInput');
+      if (saved === 'ar') {
+        input.setAttribute('dir', 'rtl');
+        input.placeholder = 'اسألني عن القرآن والحديث والفقه والسيرة…';
+      } else if (saved === 'ur') {
+        input.setAttribute('dir', 'rtl');
+        input.placeholder = 'اسلام کے بارے میں سوال پوچھیں…';
+      } else {
+        input.setAttribute('dir', 'ltr');
+        input.placeholder = 'Ask about Quran, Hadith, Fiqh, Seerah…';
+      }
+    }
+  }
+}
+
 function setLang(lang, btn) {
   currentLang = lang;
   document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('active'));
@@ -694,6 +801,7 @@ function setLang(lang, btn) {
     input.setAttribute('dir', 'ltr');
     input.placeholder = 'Ask about Quran, Hadith, Fiqh, Seerah…';
   }
+  localStorage.setItem('alilm-lang', lang);
 }
 
 /* ═══════════════════════════════════════════════
@@ -770,10 +878,34 @@ The Prophet ﷺ said: "Whoever fasts Ramadan with faith and seeking reward, his 
     },
   ];
 
-  for (const entry of answers) {
-    if (entry.keywords.some(kw => q.includes(kw))) {
-      return entry.answer;
+  // Phase 4: Add Arabic demo answers
+  if (currentLang === 'ar') {
+    const arabicAnswers = [
+      { keywords: ['صبر', 'صبور'], answer: `الصبر من أعظم الفضائل في الإسلام. يقول الله تعالى: "يا أيها الذين آمنوا استعينوا بالصبر والصلاة وإن الله مع الصابرين." [Quran Al-Baqarah 2:153]\n\nوقال النبي ﷺ: "ما أُعطي أحدٌ عطاءً خيرًا وأوسع من الصبر." [Bukhari 1469]` },
+      { keywords: ['بر الوالدين', 'أم', 'أب', 'والد'], answer: `Islam places the highest importance on honoring parents. Allah says: "وقضى ربك ألا تعبدوا إلا إياه وبالوالدين إحسانًا." [Quran Al-Isra 17:23]\n\nThe Prophet ﷺ said: "الجنة تحت أقدام الأمهات." [Ibn Majah 2781]` },
+    ];
+    for (const entry of arabicAnswers) {
+      if (entry.keywords.some(kw => q.includes(kw))) return entry.answer;
     }
+  }
+
+  // Phase 4: Add Urdu demo answers
+  if (currentLang === 'ur') {
+    const urduAnswers = [
+      { keywords: ['صبر', 'برداشت'], answer: `صبر اسلام میں سب سے بڑی فضیلتوں میں سے ایک ہے۔ اللہ تعالیٰ فرماتا ہے: "اے ایمان والو! صبر اور نماز کے ذریعے مدد مانگو بے شک اللہ صبر کرنے والوں کے ساتھ ہے۔" [Quran Al-Baqarah 2:153]\n\nنبی ﷺ نے فرمایا: "صبر سے بہتر کوئی عطا نہیں دی گئی۔" [Bukhari 1469]` },
+      { keywords: ['والدین', 'ماں', 'باپ'], answer: `اسلام میں والدین کا احترام سب سے اہم ہے۔ اللہ تعالیٰ فرماتا ہے: "اپنے رب نے حکم دیا ہے کہ آپ اس کے سوا کسی کی عبادت نہ کریں اور والدین کے ساتھ حسن سلوک کریں۔" [Quran Al-Isra 17:23]\n\nنبی ﷺ نے فرمایا: "جنت ماں کے پاؤں تلے ہے۔" [Ibn Majah 2781]` },
+    ];
+    for (const entry of urduAnswers) {
+      if (entry.keywords.some(kw => q.includes(kw))) return entry.answer;
+    }
+  }
+
+  // Default fallback — language-aware
+  if (currentLang === 'ar') {
+    return `بسم الله. شكراً لسؤالك عن "${query}".\n\nالخادم غير متصل حالياً. يرجى تشغيل الخادم الخلفي للحصول على إجابات كاملة:\n\`uvicorn src.api.main:app --reload\``;
+  }
+  if (currentLang === 'ur') {
+    return `بسم اللہ۔ "${query}" کے سوال کا شکریہ۔\n\nبیک اینڈ ابھی غیر متصل ہے۔ مکمل جوابات کے لیے بیک اینڈ چلائیں:\n\`uvicorn src.api.main:app --reload\``;
   }
 
   return `Bismillah. Thank you for your question about "${query}".
