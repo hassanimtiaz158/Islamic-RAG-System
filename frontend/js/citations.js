@@ -108,6 +108,8 @@ function highlightCitations(text) {
       `<span class="cite-inline" title="${match.replace(/"/g, '&quot;')}">${match}</span>`
     );
   });
+  // Convert newlines to <br> for proper paragraph rendering
+  result = result.replace(/\n/g, '<br>');
   return result;
 }
 

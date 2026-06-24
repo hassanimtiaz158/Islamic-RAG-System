@@ -128,13 +128,12 @@ class RAGEvaluator:
         metrics = RetrievalMetrics()
 
         all_retrieved = {}
-        with self.vector_store.EMBED_LOCK if hasattr(self.store, 'EMBED_LOCK') else self.store._client:
-            for col in expected_sources:
-                try:
-                    results = self.store.retrieve_with_scores(col, query=query, k=top_k)
-                    all_retrieved[col] = results
-                except Exception:
-                    all_retrieved[col] = []
+        for col in expected_sources:
+            try:
+                results = self.vector_store.retrieve_with_scores(col, query=query, k=top_k)
+                all_retrieved[col] = results
+            except Exception:
+                all_retrieved[col] = []
 
         total_docs = sum(len(docs) for docs in all_retrieved.values())
         metrics.num_results = total_docs

@@ -2,6 +2,7 @@
 """
 Islamic Knowledge RAG API — FastAPI application
 Provides chat/query, document upload, citation verification, and health check.
+SaaS Edition: multi-tenant, auth-ready, Redis-cached.
 """
 
 import os
@@ -11,12 +12,9 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
-from functools import lru_cache
-
-from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException
+from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -31,11 +29,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("islamic-rag")
 
-# ── Environment ──
+# ── Environment (legacy — prefer src.config.settings for new code) ──
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 LLM_MODEL = os.getenv("LLM_MODEL", "phi3")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# ── CORS: allowed origins from env (comma-separated), default to localhost only ──
+_allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:8000")
+ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins.split(",") if o.strip()]
 
 # ── Response cache (simple in-memory) ──
 _response_cache: dict = {}
@@ -157,12 +159,25 @@ app = FastAPI(
     description="AI-powered Islamic knowledge chatbot with source-backed answers from Quran, Hadith, and Tafsir.",
 )
 
+# ── Middleware Stack (order matters: outermost first) ──
+from src.middleware.security import SecurityHeadersMiddleware
+from src.middleware.error_handling import ErrorHandlingMiddleware
+from src.middleware.tenant import TenantMiddleware
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(TenantMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# ── API v1 Router (SaaS endpoints) ──
+from src.api.v1 import v1_router
+app.include_router(v1_router)
 
 # Frontend path
 FRONTEND_PATH = Path(__file__).resolve().parent.parent.parent / "frontend"
@@ -463,6 +478,26 @@ async def ask_islamic(req: QueryRequest):
     return _get_fallback_response(req.query, req.language)
 
 
+ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".txt"}
+MAX_FILENAME_LENGTH = 200
+
+
+def _sanitize_filename(filename: Optional[str]) -> str:
+    """Sanitize uploaded filename to prevent injection attacks."""
+    import re
+    if not filename:
+        return "untitled"
+    # Remove path separators and null bytes
+    filename = filename.replace("\\", "").replace("/", "").replace("\x00", "")
+    # Strip leading dots (hidden files)
+    filename = filename.lstrip(".")
+    # Allow only safe characters
+    filename = re.sub(r"[^\w\s\-.]", "_", filename)
+    # Truncate
+    filename = filename[:MAX_FILENAME_LENGTH]
+    return filename or "untitled"
+
+
 @app.post("/api/index-document")
 async def index_document(file: UploadFile = File(...)):
     """Upload and index an Islamic text document (PDF or TXT)."""
@@ -473,6 +508,18 @@ async def index_document(file: UploadFile = File(...)):
             detail="Vector store is not available. Please configure the RAG pipeline first.",
         )
 
+    # Validate file extension
+    original_filename = _sanitize_filename(file.filename)
+    if original_filename.lower().endswith(".pdf"):
+        ext = ".pdf"
+    elif original_filename.lower().endswith(".txt"):
+        ext = ".txt"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Only .pdf and .txt files are allowed.",
+        )
+
     try:
         content = await file.read()
 
@@ -481,15 +528,23 @@ async def index_document(file: UploadFile = File(...)):
             raise HTTPException(status_code=413, detail="File too large. Maximum size is 50MB.")
 
         text = None
-        if file.filename and file.filename.lower().endswith(".pdf"):
+        if ext == ".pdf":
+            # Validate PDF magic bytes
+            if not content[:5].startswith(b"%PDF-"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid PDF file. The file does not appear to be a valid PDF.",
+                )
             try:
                 import fitz  # PyMuPDF
                 with fitz.open(stream=content, filetype="pdf") as doc:
                     text = "\n\n".join(page.get_text() for page in doc)
-            except Exception as e:
+            except HTTPException:
+                raise
+            except Exception:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to extract text from PDF: {e}. Try uploading a .txt file.",
+                    detail="Failed to extract text from PDF. Try uploading a .txt file.",
                 )
         else:
             text = content.decode("utf-8", errors="replace")
@@ -506,8 +561,8 @@ async def index_document(file: UploadFile = File(...)):
                 page_content=p,
                 metadata={
                     "source": "user_upload",
-                    "filename": file.filename,
-                    "citation": f"[Uploaded: {file.filename}]",
+                    "filename": original_filename,
+                    "citation": f"[Uploaded: {original_filename}]",
                 },
             )
             for p in paragraphs
@@ -521,19 +576,38 @@ async def index_document(file: UploadFile = File(...)):
             "documents": len(docs),
             "chunks": len(docs),
             "collection": collection_name,
-            "filename": file.filename,
+            "filename": original_filename,
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Indexing error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Indexing failed due to an internal error.")
 
 
 @app.get("/api/verify-citation")
-async def verify_citation(surah: int, ayah: int):
+async def verify_citation(surah: int = Query(..., ge=1, le=114), ayah: int = Query(..., ge=1, le=286)):
     """Verify a Quran citation and return Arabic + English text."""
     import requests
+
+    # Validate surah-specific ayah limits
+    AYAH_LIMITS = {
+        1: 7, 2: 286, 3: 200, 4: 176, 5: 120, 6: 165, 7: 206, 8: 75, 9: 129, 10: 109,
+        11: 123, 12: 111, 13: 43, 14: 52, 15: 99, 16: 128, 17: 111, 18: 110, 19: 98, 20: 135,
+        21: 112, 22: 78, 23: 118, 24: 64, 25: 77, 26: 227, 27: 93, 28: 88, 29: 69, 30: 60,
+        31: 34, 32: 30, 33: 73, 34: 54, 35: 85, 36: 83, 37: 182, 38: 88, 39: 75, 40: 85,
+        41: 54, 42: 53, 43: 89, 44: 59, 45: 37, 46: 35, 47: 38, 48: 29, 49: 18, 50: 45,
+        51: 60, 52: 49, 53: 62, 54: 55, 55: 78, 56: 96, 57: 29, 58: 22, 59: 24, 60: 14,
+        61: 14, 62: 11, 63: 11, 64: 18, 65: 12, 66: 12, 67: 30, 68: 52, 69: 52, 70: 44,
+        71: 28, 72: 28, 73: 20, 74: 56, 75: 40, 76: 31, 77: 50, 78: 40, 79: 46, 80: 42,
+        81: 29, 82: 19, 83: 36, 84: 25, 85: 22, 86: 17, 87: 19, 88: 62, 89: 30, 90: 20,
+        91: 15, 92: 21, 93: 11, 94: 8, 95: 8, 96: 19, 97: 5, 98: 88, 99: 83, 100: 111,
+        101: 11, 102: 8, 103: 9, 104: 7, 105: 5, 106: 4, 107: 7, 108: 3, 109: 6, 110: 6,
+        111: 5, 112: 4, 113: 5, 114: 6,
+    }
+    max_ayahs = AYAH_LIMITS.get(surah, 286)
+    if ayah > max_ayahs:
+        return {"verified": False, "error": f"Surah {surah} has only {max_ayahs} ayahs"}
 
     try:
         # Fetch both Arabic and English in parallel
@@ -561,8 +635,15 @@ async def verify_citation(surah: int, ayah: int):
             result["error"] = "Verse not found"
         return result
 
+    except requests.exceptions.Timeout:
+        logger.warning(f"verify-citation timeout for {surah}:{ayah}")
+        return {"verified": False, "error": "External API request timed out"}
+    except requests.exceptions.ConnectionError:
+        logger.warning(f"verify-citation connection error for {surah}:{ayah}")
+        return {"verified": False, "error": "Could not reach external API"}
     except Exception as e:
-        return {"verified": False, "error": str(e)}
+        logger.error(f"verify-citation error: {e}", exc_info=True)
+        return {"verified": False, "error": "An internal error occurred"}
 
 
 class TranslateVerseRequest(BaseModel):
@@ -595,6 +676,7 @@ async def translate_verse(req: TranslateVerseRequest):
 async def ws_ask(ws: WebSocket):
     """WebSocket endpoint for streaming answers."""
     await ws.accept()
+    _init_rag()
 
     try:
         while True:
@@ -613,49 +695,47 @@ async def ws_ask(ws: WebSocket):
                         ws_conversation_id, query
                     )
 
-                    async for event in graph.astream_events(
-                        {
-                            "query": augmented_query,
-                            "language": language,
-                            "original_query": query,
-                            "translated_query": augmented_query,
-                            "response_language": language,
-                            "retrieved_docs": {},
-                            "routing": data.get("sources", ["quran", "hadith_bukhari"]),
-                            "iteration": 0,
-                            "conversation_id": conv_id,
-                            "conversation_history": [],
-                            "is_followup": bool(ws_conversation_id),
-                        },
-                        version="v2",
-                    ):
-                        if event["event"] == "on_llm_stream":
-                            chunk = event["data"].get("chunk", "")
-                            if chunk:
-                                await ws.send_json({"type": "token", "content": chunk})
+                    # Run the pipeline once and stream word-by-word
+                    final_output = graph.invoke({
+                        "query": augmented_query,
+                        "language": language,
+                        "original_query": query,
+                        "translated_query": augmented_query,
+                        "response_language": language,
+                        "retrieved_docs": {},
+                        "routing": data.get("sources", ["quran", "hadith_bukhari"]),
+                        "iteration": 0,
+                        "conversation_id": conv_id,
+                        "conversation_history": [],
+                        "is_followup": bool(ws_conversation_id),
+                    })
+                    # Stream the response word-by-word for real-time feel
+                    answer_text = final_output.get("response", "")
+                    for word in answer_text.split(" "):
+                        await ws.send_json({"type": "token", "content": word + " "})
+                    if answer_text:
+                        await ws.send_json({"type": "token", "content": "\n"})
 
-                        elif event["event"] == "on_chain_end":
-                            output = event.get("data", {}).get("output", {})
-                            # Save conversation
-                            history = _get_conversation(conv_id) or []
-                            history.append({"role": "user", "content": query})
-                            history.append({"role": "assistant", "content": output.get("response", "")[:500]})
-                            _save_conversation(conv_id, history)
+                    # Save conversation
+                    history = _get_conversation(conv_id) or []
+                    history.append({"role": "user", "content": query})
+                    history.append({"role": "assistant", "content": final_output.get("response", "")[:500]})
+                    _save_conversation(conv_id, history)
 
-                            await ws.send_json({
-                                "type": "done",
-                                "citation_cards": output.get("citation_cards", []),
-                                "citation_valid": output.get("citation_valid", False),
-                                "confidence_score": output.get("confidence_score", 0.0),
-                                "verification_passed": output.get("verification_passed", False),
-                                "source_types": output.get("source_types", []),
-                                "safety_flags": output.get("safety_flags", []),
-                                "follow_up_questions": output.get("follow_up_questions", []),
-                                "verse_triplets": output.get("verse_triplets", []),
-                                "conversation_id": conv_id,
-                                "hallucination_ratio": output.get("hallucination_ratio", 0.0),
-                                "fact_check_passed": output.get("fact_check_passed", True),
-                            })
+                    await ws.send_json({
+                        "type": "done",
+                        "citation_cards": final_output.get("citation_cards", []),
+                        "citation_valid": final_output.get("citation_valid", False),
+                        "confidence_score": final_output.get("confidence_score", 0.0),
+                        "verification_passed": final_output.get("verification_passed", False),
+                        "source_types": final_output.get("source_types", []),
+                        "safety_flags": final_output.get("safety_flags", []),
+                        "follow_up_questions": final_output.get("follow_up_questions", []),
+                        "verse_triplets": final_output.get("verse_triplets", []),
+                        "conversation_id": conv_id,
+                        "hallucination_ratio": final_output.get("hallucination_ratio", 0.0),
+                        "fact_check_passed": final_output.get("fact_check_passed", True),
+                    })
                     continue
                 except Exception as e:
                     logger.error(f"WS RAG error: {e}")
@@ -673,6 +753,7 @@ async def ws_ask(ws: WebSocket):
                 "verification_passed": fb.verification_passed,
                 "source_types": fb.source_types,
                 "safety_flags": fb.safety_flags,
+                "conversation_id": data.get("conversation_id", ""),
             })
 
     except Exception as e:

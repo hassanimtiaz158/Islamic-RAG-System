@@ -1,17 +1,16 @@
 # scripts/load_quran.py
 
-from chromadb import Documents
 import requests
 from langchain_core.documents import Document
 
 
-def load_quran_from_api() -> list[Document]:
+def load_quran_english_only() -> list[Document]:
     """
-    Load full Quran (English translation) from AlQuran.cloud API
+    Load Quran English-only translation (Yusuf Ali) from AlQuran.cloud API.
+    Kept for backward compatibility.
+
     Returns: List of LangChain Document objects
     """
-
-    # API for Yusuf Ali English translation
     url = "https://api.alquran.cloud/v1/quran/en.yusufali"
 
     try:
@@ -34,6 +33,7 @@ def load_quran_from_api() -> list[Document]:
                     page_content=text,
                     metadata={
                         "source": "quran",
+                        "language": "en",
                         "surah_number": surah_num,
                         "surah_name": surah_name,
                         "surah_arabic": surah_arabic,
@@ -42,13 +42,15 @@ def load_quran_from_api() -> list[Document]:
                         "full_ref": f"Surah {surah_name} ({surah_num}), Ayah {ayah_num}",
                     },
                 )
-
                 documents.append(doc)
 
-        print(f"Loaded {len(documents)} Ayahs from Quran successfully.")
+        print(f"Loaded {len(documents)} English Quran Ayahs successfully.")
         return documents
 
     except requests.exceptions.RequestException as e:
         print(f"Error fetching Quran data: {e}")
         return []
-    
+
+
+# Backward-compatible alias
+load_quran_from_api = load_quran_english_only

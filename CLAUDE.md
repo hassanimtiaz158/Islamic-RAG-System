@@ -4,7 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Al-Ilm** (Arabic for "The Knowledge") is an Islamic RAG (Retrieval-Augmented Generation) system that answers questions about Islam using the Quran, six authentic Hadith collections, and Tafsir Ibn Kathir. Every answer is source-attributed with formatted citations.
+**Al-Ilm** (Arabic for "The Knowledge") is an Islamic RAG (Retrieval-Augmented Generation) system that answers questions about Islam using the Quran, six authentic Hadith collections, and Tafsir Ibn Kathir. Every answer is source-attributed with formatted citations and confidence scores.
+
+## Key Features
+
+- **Zero-Hallucination Architecture**: Answers ONLY from retrieved sources — never from model knowledge
+- **Multi-Step Verification**: Retrieve → Generate → Verify → Enforce Citations → Fact Check → Finalize
+- **Confidence Scoring**: Every answer includes a confidence score (0-100%) based on retrieval, synthesis, and verification
+- **Islamic Safety Layer**: Prevents fabrication of Quran/Hadith references, adds scholarly disclaimers for sensitive topics
+- **Source Type Distinguishing**: Clearly labels Quran, Hadith, Tafsir, and Scholarly Opinion in citations
+- **Hybrid Retrieval**: MMR-based vector search with relevance threshold filtering (lambda_mult=0.75)
+- **Real-time Streaming**: WebSocket streaming with token-by-token response
+- **Triple Fallback**: WebSocket → REST → Built-in demo answers (5 topics via keyword matching)
+- **Modern UI**: ChatGPT-like interface with citation sidebar, dark mode, confidence bars
+- **Multilingual Support**: English, Arabic, and Urdu interfaces with LLM-based translation
 
 ## Common Commands
 
@@ -18,6 +31,14 @@ uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 
 # Index all data sources (Quran + 6 hadith books)
 python scripts/index_all.py
+
+# Evaluate the RAG system (faithfulness, context precision/recall, citation correctness, hallucination rate)
+python scripts/evaluate_rag.py
+
+# Load individual data sources (useful for debugging)
+python scripts/load_quran.py
+python scripts/load_hadiths.py
+python scripts/load_tafsir.py
 ```
 
 ### Running Tests
@@ -43,11 +64,19 @@ docker run -p 8000:8000 islamic-rag
 
 ### RAG Pipeline (`src/agents/`)
 
-Three-node LangGraph stateful graph (`islamic_graph.py`):
+An 11-step LangGraph stateful graph (`islamic_graph.py`):
 
-1. **Classifier** (`classifier.py`) — Uses LLM to determine which ChromaDB collections to search. Falls back to `["quran", "hadith_bukhari"]` if LLM is unavailable.
-2. **Unified Retriever** — MMR search across ChromaDB collections (k=4, fetch_k=16, lambda_mult=0.75). Thread-safe via `EMBED_LOCK`.
-3. **Synthesis** — Builds context from retrieved docs, generates cited answer using `SYNTHESIS_PROMPT`, extracts citations via regex, formats citation cards.
+1. **Classifier** (`classifier.py`) — Uses LLM to determine which ChromaDB collections to search. Falls back to `["quran", "hadith_bukhari"]` if LLM is unavailable. Includes keyword-based routing with English/Arabic/Urdu patterns.
+2. **Query Translation** — Translates non-English queries to English for vector search (the vector store contains English content).
+3. **Unified Retriever** — MMR search across ChromaDB collections (k=5, score threshold=0.3). Thread-safe via `EMBED_LOCK`. Computes retrieval confidence.
+4. **Synthesis** — Builds context from retrieved docs, generates cited answer using `SYNTHESIS_PROMPT`, extracts citations via regex.
+5. **Verification** — Checks answer grounding (whether the answer is supported by the retrieved context) and Islamic safety (flags sensitive topics, adds scholarly disclaimers).
+6. **Fact Check** — Cross-references every citation in the response against the actual retrieved context to detect hallucinated citations.
+7. **Citation Enforcement** (`enforce_citations()`) — Regenerates the answer if no citations found or if citations are invalid (max 2 retries).
+8. **Finalization** — Adds scholarly disclaimers for sensitive topics, builds verse triplets for Quran citations (Arabic/English/Urdu display).
+9. **Follow-up Suggestions** — Generates 3 relevant follow-up questions based on the Q&A.
+10. **Response Translation** — Translates the English response back to the user's selected language (preserves citations and Islamic terminology).
+11. **END** — Returns the final state.
 
 State is defined in `state.py` using `TypedDict`.
 
@@ -65,6 +94,10 @@ State is defined in `state.py` using `TypedDict`.
 - Generates URLs: `quran.com/{surah}/{ayah}` and `sunnah.com/{book}:{number}`
 - `enforce_citations()` — LangGraph node that regenerates if no citations found
 - `format_citation_cards()` — Formats for frontend sidebar with icons and colors
+- `verify_answer_grounding()` — Checks if the answer is grounded in the retrieved context
+- `check_islamic_safety()` — Flags unsupported claims and sensitive topics
+- `cross_reference_citations()` — Verifies each citation against the retrieved context
+- `build_verse_triplets()` — Builds Arabic/English/Urdu display triplets for Quran verses
 
 ### API (`src/api/main.py`)
 
@@ -97,18 +130,26 @@ State is defined in `state.py` using `TypedDict`.
 ### Configuration (`.env`)
 
 Key variables:
-- `LLM_PROVIDER` — `ollama` or `openai`
+- `LLM_PROVIDER` — `ollama`, `openai`, or `groq`
 - `OLLAMA_BASE_URL` — default `http://localhost:11434`
-- `LLM_MODEL` — `phi3` (Ollama) or `gpt-4o-mini` (OpenAI)
+- `LLM_MODEL` — `phi3` (Ollama) or `gpt-4o-mini` (OpenAI) or `llama-3.1-8b-instant` (Groq)
 - `OPENAI_API_KEY` / `GROQ_API_KEY` — API keys as needed
 - `HOST` / `PORT` — server binding
 
 ## Key Design Patterns
 
 - **Thread-safe ChromaDB access**: Global `EMBED_LOCK` in `islamic_vectorDB.py` since ChromaDB's embedding function is not thread-safe
-- **Graceful degradation**: Every component has fallbacks — LLM unavailable → default collections; RAG unavailable → curated fallback answers; backend unreachable → demo mode
-- **Citation enforcement**: The synthesis node checks for citations in the output and regenerates if none are found
-- **MMR retrieval**: Uses Maximal Marginal Relevance (lambda_mult=0.75) for diverse, non-redundant results
+- **Zero-Hallucination Architecture**: Answers ONLY from retrieved sources — never from model knowledge
+- **Multi-Step Verification**: Retrieve → Generate → Verify → Enforce Citations → Fact Check → Finalize
+- **Confidence Scoring**: Every answer includes a confidence score (0-100%) based on retrieval, synthesis, and verification
+- **Islamic Safety Layer**: Prevents fabrication of Quran/Hadith references, adds scholarly disclaimers for sensitive topics
+- **Source Type Distinguishing**: Clearly labels Quran, Hadith, Tafsir, and Scholarly Opinion in citations
+- **Hybrid Retrieval**: MMR-based vector search with relevance threshold filtering
+- **Real-time Streaming**: WebSocket streaming with token-by-token response
+- **Graceful Degradation**: Every component has fallbacks — LLM unavailable → default collections; RAG unavailable → curated fallback answers; backend unreachable → demo mode
+- **Citation Enforcement**: The synthesis node checks for citations in the output and regenerates if none are found (up to 2 retries)
+- **MMR Retrieval**: Uses Maximal Marginal Relevance (lambda_mult=0.75) for diverse, non-redundant results
+- **Verse Triplets**: For Quran citations, fetches Arabic/English/Urdu text for rich display in frontend
 
 ## LLM Integration Notes
 

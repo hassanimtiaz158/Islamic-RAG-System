@@ -1,10 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "name": "al-ilm-islamic-rag",
   "version": 2,
-  "rootDirectory": "frontend",
-  "buildCommand": null,
-  "outputDirectory": ".",
   "framework": null,
   "rewrites": [
     {

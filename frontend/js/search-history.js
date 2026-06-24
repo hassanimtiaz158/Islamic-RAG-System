@@ -40,10 +40,14 @@ function addSearchEntry(query, answerPreview) {
 }
 
 function clearSearchHistory() {
-  if (!confirm('Clear all search history?')) return;
+  const msg = (typeof currentLang !== 'undefined' && currentLang === 'ar') ? 'مسح سجل البحث؟' : (typeof currentLang !== 'undefined' && currentLang === 'ur') ? 'تلاش کی تاریخ صاف کریں؟' : 'Clear all search history?';
+  if (!confirm(msg)) return;
   saveSearchHistory([]);
   renderHistorySidebar();
-  showToast('Search history cleared');
+  if (typeof showToast === 'function') {
+    const toastMsg = (typeof currentLang !== 'undefined' && currentLang === 'ar') ? 'تم مسح سجل البحث' : (typeof currentLang !== 'undefined' && currentLang === 'ur') ? 'تلاش کی تاریخ صاف ہو گئی' : 'Search history cleared';
+    showToast(toastMsg);
+  }
 }
 
 /* ── Format timestamps ── */

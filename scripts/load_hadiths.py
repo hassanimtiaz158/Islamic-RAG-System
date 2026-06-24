@@ -1,10 +1,17 @@
 # scripts/load_hadiths.py
 
+import os
 import time
 import requests
 from langchain_core.documents import Document
 
-API_KEY = "$2y$10$EaW8I9L0kEbsv7ubW0tPZIwulE6KhbLMCEHFM4J6tOCp9X6"
+API_KEY = os.getenv("HADITH_API_KEY", "")
+if not API_KEY:
+    raise RuntimeError(
+        "HADITH_API_KEY environment variable is required. "
+        "Get a free key at https://hadithapi.com and set it via:\n"
+        "  export HADITH_API_KEY=your_key_here"
+    )
 
 # Corrected slugs for HadithAPI.com
 HADITH_COLLECTIONS = {
@@ -35,7 +42,7 @@ def _fetch_page(url, params, max_retries=3, base_timeout=30):
             response = requests.get(url, params=params, timeout=timeout)
             if response.status_code == 429:  # Rate limit
                 wait = attempt * 5
-                print(f"  [RATE LIMIT] Waiting {ss}s before retry {attempt}/{max_retries}...")
+                print(f"  [RATE LIMIT] Waiting {wait}s before retry {attempt}/{max_retries}...")
                 time.sleep(wait)
                 continue
             response.raise_for_status()

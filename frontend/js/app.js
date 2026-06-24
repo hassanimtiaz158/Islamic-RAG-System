@@ -522,12 +522,26 @@ function addAssistantBubbleEnhanced(text, citations, meta, followUps, verseTripl
   const isValid = meta.citation_valid !== undefined ? meta.citation_valid : citations.length > 0;
   const confidence = meta.confidence_score || 0;
 
-  // Follow-up question chips
-  const followUpHtml = (followUps && followUps.length > 0)
-    ? `<div class="followup-chips">${followUps.map(q =>
-        `<button class="followup-chip" onclick="(function(){document.getElementById('queryInput').value='${q.replace(/'/g, "\\'")}';document.getElementById('queryInput').dispatchEvent(new Event('input'));sendQuery();})()">${escapeHtml(q)}</button>`
-      ).join('')}</div>`
-    : '';
+  // Follow-up question chips (rendered programmatically to avoid inline handler XSS)
+  let followUpHtml = '';
+  if (followUps && followUps.length > 0) {
+    const chipsDiv = document.createElement('div');
+    chipsDiv.className = 'followup-chips';
+    followUps.forEach(q => {
+      const chip = document.createElement('button');
+      chip.className = 'followup-chip';
+      chip.textContent = q;
+      chip.addEventListener('click', () => {
+        const input = document.getElementById('queryInput');
+        input.value = q;
+        input.dispatchEvent(new Event('input'));
+        sendQuery();
+      });
+      chipsDiv.appendChild(chip);
+    });
+    // Serialize to HTML string for insertion into innerHTML
+    followUpHtml = chipsDiv.outerHTML;
+  }
 
   div.innerHTML = `
     <div class="bubble bubble-assistant ${bubbleClass}" dir="${isRTL ? 'rtl' : 'ltr'}">

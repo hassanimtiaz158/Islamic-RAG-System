@@ -2,24 +2,9 @@
 
 import re
 import logging
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 
 logger = logging.getLogger("islamic-rag.citations")
-
-
-# ═══════════════════════════════════════════════
-# DATA MODEL
-# ═══════════════════════════════════════════════
-@dataclass
-class Citation:
-    raw: str                          # e.g. "[Quran Al-Baqarah 2:286]"
-    source: str                       # quran / bukhari / muslim / dawud / tirmidhi / nasai / ibnmajah / tafsir
-    reference: str                    # human-readable reference
-    url: str                          # online link
-    verified: bool = False           # validation flag
-    source_type: str = "primary"     # primary (quran/hadith) / secondary (tafsir/scholarly)
-    confidence: float = 1.0          # extraction confidence
 
 
 # ═══════════════════════════════════════════════
@@ -62,13 +47,6 @@ HADITH_BOOK_MAP = {
     "nasai": "nasai",
     "ibnmajah": "ibnmajah",
 }
-
-# ═══════════════════════════════════════════════
-# URL TEMPLATES
-# ═══════════════════════════════════════════════
-QURAN_ONLINE_BASE = "https://quran.com/{surah}/{ayah}"
-HADITH_ONLINE_BASE = "https://sunnah.com/{book}:{number}"
-
 
 # ═══════════════════════════════════════════════
 # EXTRACTION

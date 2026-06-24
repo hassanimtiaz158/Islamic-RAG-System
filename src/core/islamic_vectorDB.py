@@ -45,6 +45,7 @@ class IslamicVectorStore:
     - MMR retrieval for diverse results
     - Relevance threshold filtering
     - Retrieval confidence scoring
+    - Multi-tenant support via tenant_id parameter
     """
 
     def __init__(self, persist_directory: str = "data/vectorstore") -> None:
@@ -92,33 +93,21 @@ class IslamicVectorStore:
             indexed = min(i + batch_size, total_docs)
             print(f"[{collection_name}] Indexed {indexed}/{total_docs} documents")
 
-    def safe_embed_query(self, text) -> list:
-        """Thread-safe query embedding."""
-        with EMBED_LOCK:
-            return self.embeddings.embed_query(text)
-
-    def get_retriever(self, collection_name: str, k: int = 5):
-        """Create an MMR retriever for a collection."""
-        return self.get_store(collection_name).as_retriever(
-            search_type="mmr",
-            search_kwargs={
-                "k": k,
-                "fetch_k": k * 4,
-                "lambda_mult": 0.75,
-            },
-        )
-
     def retrieve_with_scores(
         self,
         collection_name: str,
         query: str,
         k: int = 5,
+        tenant_id: Optional[str] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve documents with relevance scores.
         Returns list of (Document, score) tuples, filtered by threshold.
+        tenant_id: optional filter for per-tenant collections.
         """
-        store = self.get_store(collection_name)
+        # Resolve actual collection name (tenant-scoped if tenant_id provided)
+        actual_collection = self._resolve_collection(collection_name, tenant_id)
+        store = self.get_store(actual_collection)
         with EMBED_LOCK:
             results = store.similarity_search_with_relevance_scores(
                 query, k=k
@@ -185,10 +174,18 @@ class IslamicVectorStore:
         except Exception:
             return 0
 
-    def delete_collection(self, collection_name: str) -> None:
-        """Delete a collection and remove from cache."""
-        try:
-            self.client.delete_collection(collection_name)
-        except Exception:
-            pass
-        self._stores.pop(collection_name, None)
+    def _resolve_collection(self, collection_name: str, tenant_id: Optional[str] = None) -> str:
+        """Resolve collection name, applying tenant scoping if needed.
+
+        Shared collections (quran, hadith_*, tafsir, fiqh, seerah) are global.
+        User uploads and custom collections are tenant-scoped.
+        """
+        shared_collections = {"quran", "hadith_bukhari", "hadith_muslim", "hadith_dawud",
+                              "hadith_tirmidhi", "hadith_nasai", "hadith_ibnmajah",
+                              "tafsir", "fiqh", "seerah"}
+
+        if collection_name in shared_collections or tenant_id is None:
+            return collection_name
+
+        return f"tenant_{tenant_id}_{collection_name}"
+

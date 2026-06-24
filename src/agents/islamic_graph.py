@@ -3,13 +3,14 @@
 import os
 import json
 import logging
+import re
 from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 
 from src.agents.state import IslamicAgentState
-from src.core.islamic_vectorDB import EMBED_LOCK, IslamicVectorStore
+from src.core.islamic_vectorDB import IslamicVectorStore
 from src.agents.classifier import classifier_node
 from src.utils.citation_engine import (
     extract_citations,
@@ -27,58 +28,32 @@ logger = logging.getLogger("islamic-rag")
 
 
 # ═══════════════════════════════════════════════
-# MODEL INITIALIZATION
+# MODEL INITIALIZATION (Groq only)
 # ═══════════════════════════════════════════════
 def _get_llm():
-    """Get an LLM based on environment configuration."""
-    provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-    model = os.getenv("LLM_MODEL", "phi3")
+    """Get an LLM from Groq."""
+    model = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+    api_key = os.getenv("GROQ_API_KEY", "")
 
-    if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        if api_key:
-            try:
-                from langchain_openai import ChatOpenAI
-                return ChatOpenAI(
-                    model=model or "gpt-4o-mini",
-                    temperature=0.0,
-                    api_key=api_key,
-                )
-            except Exception as e:
-                logger.warning(f"OpenAI LLM init failed: {e}")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is required. "
+            "Get a free key at https://console.groq.com and set it in .env"
+        )
 
-    if provider == "groq":
-        api_key = os.getenv("GROQ_API_KEY", "")
-        if api_key:
-            try:
-                from langchain_groq import ChatGroq
-                return ChatGroq(
-                    model=model or "llama-3.1-8b-instant",
-                    temperature=0.0,
-                    groq_api_key=api_key,
-                )
-            except ImportError:
-                logger.warning("langchain-groq not installed. Run: pip install langchain-groq")
-            except Exception as e:
-                logger.warning(f"Groq LLM init failed: {e}")
-
-    # Default: try Ollama
     try:
-        from langchain_ollama import OllamaLLM
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return OllamaLLM(
-            model=model or "phi3",
+        from langchain_groq import ChatGroq
+        return ChatGroq(
+            model=model,
             temperature=0.0,
-            base_url=base_url,
+            groq_api_key=api_key,
+        )
+    except ImportError:
+        raise RuntimeError(
+            "langchain-groq not installed. Run: pip install langchain-groq"
         )
     except Exception as e:
-        logger.warning(f"Ollama LLM init failed: {e}")
-        raise RuntimeError(
-            "No working LLM provider configured. "
-            "Set LLM_PROVIDER=openai with OPENAI_API_KEY, "
-            "LLM_PROVIDER=groq with GROQ_API_KEY, "
-            "or ensure Ollama is running."
-        )
+        raise RuntimeError(f"Groq LLM init failed: {e}")
 
 
 # ═══════════════════════════════════════════════
@@ -302,34 +277,33 @@ def unified_retriever_node(vector_store: IslamicVectorStore):
 
         logger.info(f"Retrieving from collections: {routing} with query: '{query[:60]}...'")
 
-        with EMBED_LOCK:
-            for col in routing:
-                try:
-                    scored_docs = vector_store.retrieve_with_scores(
-                        col, query=query, k=5
-                    )
+        for col in routing:
+            try:
+                scored_docs = vector_store.retrieve_with_scores(
+                    col, query=query, k=5
+                )
 
-                    results[col] = []
-                    all_scores[col] = []
+                results[col] = []
+                all_scores[col] = []
 
-                    for doc, score in scored_docs:
-                        results[col].append({
-                            "text": doc.page_content,
-                            "citation": doc.metadata.get("citation", ""),
-                            "score": round(score, 3),
-                            "metadata": doc.metadata,
-                        })
-                        all_scores[col].append(score)
+                for doc, score in scored_docs:
+                    results[col].append({
+                        "text": doc.page_content,
+                        "citation": doc.metadata.get("citation", ""),
+                        "score": round(score, 3),
+                        "metadata": doc.metadata,
+                    })
+                    all_scores[col].append(score)
 
-                    logger.info(
-                        f"[{col}] Retrieved {len(results[col])} docs, "
-                        f"scores: {[round(s, 3) for s in all_scores[col]]}"
-                    )
+                logger.info(
+                    f"[{col}] Retrieved {len(results[col])} docs, "
+                    f"scores: {[round(s, 3) for s in all_scores[col]]}"
+                )
 
-                except Exception as e:
-                    logger.warning(f"Retrieval failed for {col}: {e}")
-                    results[col] = []
-                    all_scores[col] = []
+            except Exception as e:
+                logger.warning(f"Retrieval failed for {col}: {e}")
+                results[col] = []
+                all_scores[col] = []
 
         # Compute retrieval confidence
         retrieval_confidence = vector_store.compute_retrieval_confidence(
@@ -411,13 +385,8 @@ def synthesis_node(llm):
         citations = extract_citations(response_text)
         citation_cards = format_citation_cards(citations)
 
-        is_grounded, unsupported, grounding_confidence = verify_answer_grounding(
-            response_text, context, citations
-        )
-
         logger.info(
             f"Synthesis complete: {len(citations)} citations, "
-            f"grounded: {is_grounded}, confidence: {grounding_confidence:.2f}, "
             f"language: {language}"
         )
 
@@ -428,7 +397,7 @@ def synthesis_node(llm):
             "citations": [c["raw"] for c in citations],
             "citation_cards": citation_cards,
             "citation_valid": len(citations) > 0,
-            "confidence_score": round(grounding_confidence, 2),
+            "confidence_score": 0.5,  # Will be overwritten by enforce_citations/verification
         }
 
     return node
@@ -441,7 +410,9 @@ def verification_node():
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         response = state.get("response", "")
         context = state.get("context", "")
-        citations_raw = extract_citations(response)
+        # Reuse citations already extracted in synthesis_node
+        citation_raws = state.get("citations", [])
+        citations_raw = [{"raw": r, "source": "unknown"} for r in citation_raws]
 
         is_grounded, unsupported, grounding_confidence = verify_answer_grounding(
             response, context, citations_raw
@@ -491,7 +462,9 @@ def fact_check_node():
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         response = state.get("response", "")
         context = state.get("context", "")
-        citations = extract_citations(response)
+        # Reuse citations already extracted in synthesis_node
+        citation_raws = state.get("citations", [])
+        citations = [{"raw": r, "source": "unknown"} for r in citation_raws]
 
         verdicts, hallucination_ratio, fact_check_passed = cross_reference_citations(
             response, context, citations
@@ -533,6 +506,8 @@ def suggest_followups_node(llm):
     """
     Generates 3 relevant follow-up questions based on the Q&A.
     Gracefully degrades to empty list on any failure.
+    NOTE: This node is skipped by default to reduce latency.
+    It runs only if state["include_followups"] is True.
     """
     FOLLOWUP_PROMPT = """\
 Based on the following Islamic Q&A, suggest 3 natural follow-up questions a user might ask.
@@ -545,6 +520,10 @@ Follow-up questions (JSON array):
 """
 
     def node(state: IslamicAgentState) -> Dict[str, Any]:
+        # Skip follow-up generation by default to reduce latency
+        if not state.get("include_followups", False):
+            return {"follow_up_questions": []}
+
         response = state.get("response", "")
         query = state.get("query", "")
 
@@ -560,12 +539,10 @@ Follow-up questions (JSON array):
             raw_text = raw.content if hasattr(raw, "content") else str(raw)
 
             # Parse JSON array from response
-            # Try to find a JSON array in the text
             array_match = re.search(r"\[.*?\]", raw_text, re.DOTALL)
             if array_match:
                 questions = json.loads(array_match.group(0))
                 if isinstance(questions, list):
-                    # Sanitize: limit to 3, ensure strings
                     questions = [
                         str(q).strip()
                         for q in questions[:3]
@@ -610,7 +587,8 @@ def finalization_node():
 
         # Build verse triplets for Quran citations (Arabic/English/Urdu display)
         context = state.get("context", "")
-        all_citations = extract_citations(response)
+        citation_raws = state.get("citations", [])
+        all_citations = [{"raw": r, "source": "quran"} for r in citation_raws]
         verse_triplets = build_verse_triplets(all_citations, context)
 
         return {
@@ -627,15 +605,16 @@ def finalization_node():
 # ═══════════════════════════════════════════════
 # Pipeline:
 #   classifier → translate_query → retriever → synthesis → verify
-#   → fact_check → enforce_citations → finalize → suggest_followups
+#   → fact_check → enforce_citations → finalize → suggest_followups*
 #   → translate_response → END
+#   (* = skipped by default for latency)
 # ═══════════════════════════════════════════════
 def build_islamic_graph(vector_store: IslamicVectorStore):
     try:
         llm = _get_llm()
     except RuntimeError:
-        logger.warning("No LLM available -- graph will use fallback mode")
-        llm = None
+        logger.warning("No LLM available -- API will use fallback mode")
+        raise
 
     graph = StateGraph(IslamicAgentState)
 
