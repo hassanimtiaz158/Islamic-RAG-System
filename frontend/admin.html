@@ -77,7 +77,10 @@
   </div>
 
   <script>
-    const API_BASE = (window.__API_BASE__) || 'http://localhost:8000';
+    // Use the same-origin API base set by the host app (matches index.html).
+    // Falls back to '' (same-origin) which is correct when served by FastAPI.
+    window.__API_BASE__ = window.__API_BASE__ || '';
+    const API_BASE = window.__API_BASE__ || '';
     const dropZone = document.getElementById('dropZone');
     const fileInput = document.getElementById('fileInput');
     const status = document.getElementById('uploadStatus');

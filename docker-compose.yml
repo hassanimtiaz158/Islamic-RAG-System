@@ -30,6 +30,8 @@ services:
       - vectorstore:/app/data/vectorstore
       # Mount source for hot-reload during development
       - ./src:/app/src:ro
+      # Mount frontend for hot-reload during development
+      - ./frontend:/app/frontend:ro
     depends_on:
       mongo:
         condition: service_healthy

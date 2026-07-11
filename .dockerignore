@@ -45,12 +45,13 @@ Thumbs.db
 # Logs
 *.log
 
-# Tests / scripts (not needed in production image)
+# Tests / scripts (not needed in production image at runtime; indexing is
+# performed out-of-band and the app degrades gracefully to demo mode).
 scripts/
 tests/
 
-# Frontend (served separately on Vercel)
-frontend/
+# Frontend IS served by the backend container (see Dockerfile COPY frontend/
+# and the StaticFiles mount in src/api/main.py). Keep it in the build context.
 
 # Docker meta
 Dockerfile

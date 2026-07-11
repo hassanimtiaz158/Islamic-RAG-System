@@ -136,23 +136,24 @@ _rag_init_lock = threading.Lock()
 def _init_rag():
     """Lazy initialization of the RAG pipeline."""
     global vector_store, graph, _rag_initialized, _rag_error
+    # Hold the lock across the entire check-and-initialize window so concurrent
+    # requests cannot both initialize the pipeline / Chroma client.
     with _rag_init_lock:
         if _rag_initialized:
             return
-    try:
-        from src.core.islamic_vectorDB import IslamicVectorStore
-        from src.agents.islamic_graph import build_islamic_graph
+        try:
+            from src.core.islamic_vectorDB import IslamicVectorStore
+            from src.agents.islamic_graph import build_islamic_graph
 
-        vector_store = IslamicVectorStore()
-        graph = build_islamic_graph(vector_store)
-        with _rag_init_lock:
+            vector_store = IslamicVectorStore()
+            graph = build_islamic_graph(vector_store)
             _rag_initialized = True
             _rag_error = ""
-        logger.info("RAG pipeline initialized successfully")
-    except Exception as e:
-        _rag_error = str(e)
-        logger.error(f"RAG pipeline initialization failed: {e}", exc_info=True)
-        logger.warning("Using fallback demo mode.")
+            logger.info("RAG pipeline initialized successfully")
+        except Exception as e:
+            _rag_error = str(e)
+            logger.error(f"RAG pipeline initialization failed: {e}", exc_info=True)
+            logger.warning("Using fallback demo mode.")
 
 
 # =========================
@@ -421,6 +422,12 @@ async def ask_islamic(req: QueryRequest):
                 req.conversation_id, req.query
             )
 
+            # Always include user-uploaded documents so uploaded files are
+            # retrievable (the classifier only routes to shared collections).
+            routing = list(req.sources)
+            if "user_uploaded" not in routing:
+                routing.append("user_uploaded")
+
             result = graph.invoke({
                 "query": augmented_query,
                 "language": req.language,
@@ -428,7 +435,7 @@ async def ask_islamic(req: QueryRequest):
                 "translated_query": augmented_query,
                 "response_language": req.language,
                 "retrieved_docs": {},
-                "routing": req.sources,
+                "routing": routing,
                 "iteration": 0,
                 "conversation_id": conv_id,
                 "conversation_history": [],
@@ -440,6 +447,9 @@ async def ask_islamic(req: QueryRequest):
 
             answer = result.get("response", "")
             citations = result.get("citations", [])
+            # Citations are now full dicts internally; the response model
+            # expects a list of raw citation strings.
+            citations = [c["raw"] if isinstance(c, dict) else c for c in citations]
             citation_cards = result.get("citation_cards", [])
             citation_valid = result.get("citation_valid", False)
             sources_used = list(result.get("retrieved_docs", {}).keys())
@@ -730,6 +740,9 @@ async def ws_ask(ws: WebSocket):
                     )
 
                     # Run the pipeline once and stream word-by-word
+                    ws_routing = list(data.get("sources", ["quran", "hadith_bukhari"]))
+                    if "user_uploaded" not in ws_routing:
+                        ws_routing.append("user_uploaded")
                     final_output = graph.invoke({
                         "query": augmented_query,
                         "language": language,
@@ -737,7 +750,7 @@ async def ws_ask(ws: WebSocket):
                         "translated_query": augmented_query,
                         "response_language": language,
                         "retrieved_docs": {},
-                        "routing": data.get("sources", ["quran", "hadith_bukhari"]),
+                        "routing": ws_routing,
                         "iteration": 0,
                         "conversation_id": conv_id,
                         "conversation_history": [],

@@ -16,6 +16,7 @@ from src.core.islamic_chunker import (
 from scripts.load_quran import load_quran_from_api
 from scripts.load_hadiths import load_hadith_collection
 from scripts.load_tafsir import load_tafsir_from_json
+from scripts.load_fiqh import load_fiqh, load_seerah
 
 
 HADITH_BOOKS = [
@@ -78,6 +79,21 @@ def index_tafsir(vector_store: IslamicVectorStore) -> None:
     print(f"[OK] Tafsir indexed: {len(chunks)} chunks")
 
 
+def index_fiqh_seerah(vector_store: IslamicVectorStore) -> None:
+    """Index the fiqh and seerah collections from bundled PDFs/TXT."""
+    for collection_key, loader in (("fiqh", load_fiqh), ("seerah", load_seerah)):
+        print("\n" + "=" * 70)
+        print(f"[{collection_key.upper()}] Indexing {collection_key}...")
+        print("=" * 70)
+
+        chunks = loader()
+        if not chunks:
+            continue
+
+        vector_store.index_documents(collection_key, chunks)
+        print(f"[OK] {collection_key} indexed: {len(chunks)} chunks")
+
+
 def main() -> None:
     """Run complete indexing pipeline."""
     print("\n[START] Starting Islamic RAG Indexing Pipeline...\n")
@@ -87,6 +103,7 @@ def main() -> None:
     index_quran(vector_store)
     index_hadith(vector_store)
     index_tafsir(vector_store)
+    index_fiqh_seerah(vector_store)
 
     print("\n" + "=" * 70)
     print("[DONE] All collections indexed successfully!")

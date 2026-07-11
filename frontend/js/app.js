@@ -269,13 +269,17 @@ function scheduleReconnect() {
 
 function handleStreamError(message) {
   removeTypingIndicator();
+  // Remove any partially-streamed bubble so the user doesn't see a half-written answer
+  if (_streamBubble) {
+    _streamBubble.remove();
+    _streamBubble = null;
+  }
   const retryMsg = currentLang === 'ar' ? 'يرجى إعادة صياغة سؤالك أو اختيار مصادر مختلفة.' : (currentLang === 'ur' ? 'براہ کرم اپنا سوال دوبارہ لکھیں یا مختلف ذرائع منتخب کریں۔' : 'Please try rephrasing your question or select different sources.');
   addAssistantBubble(
     `⚠️ ${message}\n\n${retryMsg}`,
     [], false
   );
   isLoading = false;
-  if (_streamBubble) _streamBubble = null;
 }
 
 /* Streaming helpers */
@@ -334,7 +338,10 @@ function finalizeStreamResponse(msg) {
 
       // Verse display (Arabic + English + Urdu triplet)
       const verseEl = _streamBubble.querySelector('.verse-slot');
-      if (verseEl) verseEl.innerHTML = buildVerseDisplay(citations) + buildVerseTripletDisplay(citations);
+      if (verseEl) {
+        if (msg.verse_triplets && msg.verse_triplets.length) ingestVerseTriplets(msg.verse_triplets);
+        verseEl.innerHTML = buildVerseDisplay(citations) + buildVerseTripletDisplay(citations);
+      }
 
       // Update meta badge with enhanced info
       updateMetaBadge(msg, citations);
@@ -377,13 +384,20 @@ async function sendQuery() {
 
   // ── Try WebSocket first ──
   if (!IS_VERCEL && ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      query,
-      language: currentLang,
-      sources,
-      conversation_id: currentConversationId || '',
-    }));
-    return;
+    try {
+      ws.send(JSON.stringify({
+        query,
+        language: currentLang,
+        sources,
+        conversation_id: currentConversationId || '',
+      }));
+      return;
+    } catch (e) {
+      // ws.send() can throw if the socket closes between the readyState check
+      // and the call. Drop the socket and fall through to the REST path.
+      console.warn('[WS] send failed, falling back to REST:', e);
+      ws = null;
+    }
   }
 
   // ── REST fallback ──
@@ -579,6 +593,9 @@ function addAssistantBubbleEnhanced(text, citations, meta, followUps, verseTripl
   const bubbleClass = lang === 'ur' ? 'bubble-urdu' : (lang === 'ar' ? 'bubble-arabic' : '');
 
   const highlighted = highlightCitations(escapeHtml(text));
+  // Prefill verse cache from backend triplets (when supplied) so the verse
+  // display renders without an extra external API call.
+  if (verseTriplets && verseTriplets.length) ingestVerseTriplets(verseTriplets);
   const verseHtml   = buildVerseDisplay(citations) + buildVerseTripletDisplay(citations);
   const isValid = meta.citation_valid !== undefined ? meta.citation_valid : citations.length > 0;
   const confidence = meta.confidence_score || 0;
@@ -638,6 +655,17 @@ function addAssistantBubbleEnhanced(text, citations, meta, followUps, verseTripl
   `;
 
   msgs.appendChild(div);
+
+  // Re-attach follow-up chip listeners (innerHTML serialisation strips them)
+  div.querySelectorAll('.followup-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const input = document.getElementById('queryInput');
+      input.value = chip.textContent;
+      input.dispatchEvent(new Event('input'));
+      sendQuery();
+    });
+  });
+
   addMsgActions(div);
   scrollBottom();
 }
@@ -828,9 +856,12 @@ function getSelectedSources() {
     'src-ibnmajah': 'hadith_ibnmajah',
     'src-tafsir':   'tafsir',
   };
-  return Object.entries(map)
+  const selected = Object.entries(map)
     .filter(([id]) => document.getElementById(id)?.checked)
     .map(([, val]) => val);
+  // Never send an empty list — an empty `sources` would make the backend
+  // retrieve nothing. Fall back to the default collections instead.
+  return selected.length ? selected : ['quran', 'hadith_bukhari'];
 }
 
 function toggleSources() {

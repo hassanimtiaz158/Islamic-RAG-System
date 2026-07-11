@@ -45,7 +45,9 @@ def _get_llm():
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         try:
             from langchain_ollama import ChatOllama
-            fallback_model = os.getenv("LLM_MODEL", "phi3:latest")
+            # Use a dedicated Ollama model default, not the primary LLM model
+            # (which may be a hosted model name like "llama-3.1-8b-instant").
+            fallback_model = os.getenv("OLLAMA_FALLBACK_MODEL", "phi3:latest")
             logger.warning(
                 f"No API key for {provider} — falling back to Ollama ({fallback_model})"
             )
@@ -614,7 +616,9 @@ def synthesis_node(llm):
             "context": context,
             "context_sources": source_labels,
             "response": response_text,
-            "citations": [c["raw"] for c in citations],
+            # Preserve full citation dicts (with `source`) so downstream
+            # verification / fact-check nodes can route correctly.
+            "citations": citations,
             "citation_cards": citation_cards,
             "citation_valid": len(citations) > 0,
             "confidence_score": 0.5,  # Will be overwritten by enforce_citations/verification
@@ -630,9 +634,12 @@ def verification_node():
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         response = state.get("response", "")
         context = state.get("context", "")
-        # Reuse citations already extracted in synthesis_node
+        # Reuse citations already extracted in synthesis_node (full dicts)
         citation_raws = state.get("citations", [])
-        citations_raw = [{"raw": r, "source": "unknown"} for r in citation_raws]
+        citations_raw = [
+            r if isinstance(r, dict) else {"raw": r, "source": "unknown"}
+            for r in citation_raws
+        ]
 
         is_grounded, unsupported, grounding_confidence = verify_answer_grounding(
             response, context, citations_raw
@@ -682,9 +689,12 @@ def fact_check_node():
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         response = state.get("response", "")
         context = state.get("context", "")
-        # Reuse citations already extracted in synthesis_node
+        # Reuse citations already extracted in synthesis_node (full dicts)
         citation_raws = state.get("citations", [])
-        citations = [{"raw": r, "source": "unknown"} for r in citation_raws]
+        citations = [
+            r if isinstance(r, dict) else {"raw": r, "source": "unknown"}
+            for r in citation_raws
+        ]
 
         verdicts, hallucination_ratio, fact_check_passed = cross_reference_citations(
             response, context, citations
@@ -802,13 +812,17 @@ def finalization_node():
             response = get_ui_string("insufficient_evidence", language)
             confidence = 0.0
 
-        elif "sensitive_topic" in safety_flags and "scholarly_opinion" not in state.get("source_types", []):
+        elif "sensitive_topic" in safety_flags:
             response += get_ui_string("scholar_disclaimer", language)
 
-        # Build verse triplets for Quran citations (Arabic/English/Urdu display)
+        # Build verse triplets for Quran citations (Arabic/English/Urdu display).
+        # Preserve each citation's source so only Quran citations get triplets.
         context = state.get("context", "")
         citation_raws = state.get("citations", [])
-        all_citations = [{"raw": r, "source": "quran"} for r in citation_raws]
+        all_citations = [
+            r if isinstance(r, dict) else {"raw": r, "source": "unknown"}
+            for r in citation_raws
+        ]
         verse_triplets = build_verse_triplets(all_citations, context)
 
         return {

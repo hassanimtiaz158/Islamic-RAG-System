@@ -12,32 +12,40 @@ logger = logging.getLogger("islamic-rag.citations")
 # ═══════════════════════════════════════════════
 CITATION_REGEX = {
     "quran": r"\[Quran\s+([A-Za-z\-']+(?:\s+[A-Za-z\-']+)*)\s+(\d+):(\d+)\]",
-
-    "bukhari": (
-        r"\[Bukhari[,\s]+([^,\]]+),?\s*No\.?\s*(\d+)[^\]]*\]"
-        r"|\[Bukhari\s+(\d+)\]"
-    ),
-    "muslim": (
-        r"\[Muslim[,\s]+([^,\]]+),?\s*No\.?\s*(\d+)[^\]]*\]"
-        r"|\[Muslim\s+(\d+)\]"
-    ),
-    "dawud": (
-        r"\[Abu\s+Dawud[,\s]+([^,\]]+),?\s*No\.?\s*(\d+)[^\]]*\]"
-        r"|\[Abu\s+Dawud\s+(\d+)\]"
-    ),
-    "tirmidhi": (
-        r"\[Tirmidhi[,\s]+([^,\]]+),?\s*No\.?\s*(\d+)[^\]]*\]"
-        r"|\[Tirmidhi\s+(\d+)\]"
-    ),
-    "nasai": (
-        r"\[Nasai[,\s]+([^,\]]+),?\s*No\.?\s*(\d+)[^\]]*\]"
-        r"|\[Nasai\s+(\d+)\]"
-    ),
-    "ibnmajah": (
-        r"\[Ibn\s+Majah[,\s]+([^,\]]+),?\s*No\.?\s*(\d+)[^\]]*\]"
-        r"|\[Ibn\s+Majah\s+(\d+)\]"
-    ),
 }
+
+# Hadith book collections and their name variants as they appear in citations.
+_HADITH_DEFS = {
+    "bukhari": ["Bukhari"],
+    "muslim": ["Muslim"],
+    "dawud": ["Abu Dawud"],
+    "tirmidhi": ["Tirmidhi"],
+    "nasai": ["Nasai", "Nasa'i"],
+    "ibnmajah": ["Ibn Majah"],
+}
+
+# Build a regex per hadith collection. Each supports two citation shapes:
+#   1. Verbose:  [Bukhari, Sahih Bukhari, No. 1469]   -> group(1) = number
+#   2. Compact:  [Bukhari 1469] or [Bukhari 1469 (Sahih)] (optional grade) -> group(2) = number
+HADITH_BOOK_LABEL = {
+    "bukhari": "Bukhari",
+    "muslim": "Muslim",
+    "dawud": "Abu Dawud",
+    "tirmidhi": "Tirmidhi",
+    "nasai": "Nasai",
+    "ibnmajah": "Ibn Majah",
+}
+
+for _key, _names in _HADITH_DEFS.items():
+    _alts = []
+    for _name in _names:
+        _alts.append(
+            r"\[" + re.escape(_name) + r"[,\s]+(?:[^,\]]*?,?\s*)?No\.?\s*(\d+)[^\]]*\]"
+        )
+        _alts.append(
+            r"\[" + re.escape(_name) + r"\s+(\d+)(?:\s*\([^)]*\))?\]"
+        )
+    CITATION_REGEX[_key] = "|".join(_alts)
 
 HADITH_BOOK_MAP = {
     "bukhari": "bukhari",
@@ -47,6 +55,17 @@ HADITH_BOOK_MAP = {
     "nasai": "nasai",
     "ibnmajah": "ibnmajah",
 }
+
+
+def _strip_grade(raw: str) -> str:
+    """Return a canonical citation form with any `(Grade)` removed.
+
+    e.g. '[Bukhari 1469 (Sahih)]' -> '[Bukhari 1469]'. This lets response
+    citations (which omit the grade) match context citations (which include it).
+    Only a parenthesised group immediately before the closing ']' is removed.
+    """
+    raw = raw.strip()
+    return re.sub(r"\s*\([^)]*\)\s*\]", "]", raw)
 
 # ═══════════════════════════════════════════════
 # EXTRACTION
@@ -80,21 +99,19 @@ def extract_citations(text: str) -> List[Dict[str, Any]]:
             continue
 
         for m in re.finditer(regex, text):
-            if m.group(1) and m.group(2):
-                ref = f"{m.group(1).strip()}, Hadith No. {m.group(2)}"
-                num = m.group(2)
-            elif m.group(3):
-                ref = f"Hadith No. {m.group(3)}"
-                num = m.group(3)
-            else:
+            # group(1) = number from verbose "No. N" form, group(2) = compact "N" form
+            num = m.group(1) or m.group(2)
+            if not num:
                 continue
 
             book_slug = HADITH_BOOK_MAP.get(source_key, source_key)
+            label = HADITH_BOOK_LABEL.get(source_key, source_key)
 
             citations.append({
-                "raw": m.group(0),
+                "raw": _strip_grade(m.group(0)),
                 "source": source_key,
-                "reference": ref,
+                "reference": f"{label} {num}",
+                "num": num,
                 "url": f"https://sunnah.com/{book_slug}:{num}",
                 "verified": True,
                 "source_type": "primary",
@@ -128,22 +145,15 @@ def format_citation_cards(citations: List[Dict[str, Any]]) -> List[Dict[str, Any
     seen = set()
 
     for c in citations:
-        if isinstance(c, dict):
-            source = c.get("source", "unknown")
-            raw = c.get("raw", "")
-            ref = c.get("reference", raw)
-            url = c.get("url", "")
-            verified = c.get("verified", True)
-            source_type = c.get("source_type", "primary")
-        elif isinstance(c, Citation):
-            source = c.source
-            raw = c.raw
-            ref = c.reference
-            url = c.url
-            verified = c.verified
-            source_type = c.source_type
-        else:
+        if not isinstance(c, dict):
             continue
+
+        source = c.get("source", "unknown")
+        raw = c.get("raw", "")
+        ref = c.get("reference", raw)
+        url = c.get("url", "")
+        verified = c.get("verified", True)
+        source_type = c.get("source_type", "primary")
 
         # Deduplicate
         if raw in seen:
@@ -355,16 +365,6 @@ def enforce_citations(state: dict, llm) -> dict:
         final_confidence = 0.0
         is_grounded = False
 
-    # Add scholarly disclaimer for sensitive topics
-    if "sensitive_topic" in safety_flags and "scholarly_opinion" not in source_types:
-        response_text += (
-            "\n\n⚠️ **Important Note:** This topic involves nuanced Islamic rulings. "
-            "The information above is based on the retrieved sources. "
-            "For personal religious obligations (fard, haram, halal), "
-            "please consult a qualified Islamic scholar who can consider "
-            "your specific circumstances."
-        )
-
     return {
         "response": response_text,
         "citations": [c["raw"] for c in citations],
@@ -469,10 +469,16 @@ def cross_reference_citations(
                 verdict["reason"] = "Collection and number found in context"
                 verified_count += 1
             elif name_in_context:
-                verdict["verified"] = True
-                verdict["reason"] = "Collection name found in context"
-                verified_count += 1
+                # Collection is mentioned but the specific hadith number is
+                # not present — treat as unverified so fabricated numbers are
+                # caught rather than silently approved.
+                verdict["verified"] = False
+                verdict["reason"] = (
+                    f"Collection '{source}' found but hadith number "
+                    f"'{num_str}' not found in retrieved context"
+                )
             else:
+                verdict["verified"] = False
                 verdict["reason"] = (
                     f"Collection '{source}' not found in retrieved context"
                 )

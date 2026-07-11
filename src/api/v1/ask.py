@@ -45,10 +45,13 @@ async def ask_v1(
 ):
     """Tenant-scoped query endpoint with auth support."""
     # Initialize RAG pipeline
-    from src.api.main import _init_rag, graph
-    _init_rag()
+    from src.api import main
 
-    if graph is None:
+    main._init_rag()
+
+    # Access the graph dynamically — it is assigned as a module global by
+    # main._init_rag(), so a stale `from ... import graph` binding would be None.
+    if main.graph is None:
         raise HTTPException(
             status_code=503,
             detail="RAG pipeline not available",
@@ -70,7 +73,7 @@ async def ask_v1(
     start_time = time.time()
 
     try:
-        result = graph.invoke({
+        result = main.graph.invoke({
             "query": augmented_query,
             "language": req.language,
             "original_query": req.query,
@@ -88,6 +91,9 @@ async def ask_v1(
 
         answer = result.get("response", "")
         citations = result.get("citations", [])
+        # Citations are now full dicts internally; the response model
+        # expects a list of raw citation strings.
+        citations = [c["raw"] if isinstance(c, dict) else c for c in citations]
         citation_cards = result.get("citation_cards", [])
         citation_valid = result.get("citation_valid", False)
         sources_used = list(result.get("retrieved_docs", {}).keys())

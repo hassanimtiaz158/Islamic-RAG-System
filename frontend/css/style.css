@@ -1778,6 +1778,30 @@ body::before {
   box-shadow: 0 0 8px rgba(26, 92, 56, 0.1);
 }
 
+.card-verified {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: rgba(26, 92, 56, 0.10);
+  color: var(--green-rich);
+  border: 1px solid rgba(26, 92, 56, 0.20);
+}
+
+.card-verified.pending {
+  background: rgba(120, 120, 120, 0.10);
+  color: var(--text-muted);
+  border-color: rgba(120, 120, 120, 0.25);
+}
+
+.card-verified.unverified {
+  background: rgba(180, 60, 30, 0.10);
+  color: #b53c1e;
+  border-color: rgba(180, 60, 30, 0.25);
+}
+
 .card-reference {
   font-family: var(--font-body);
   font-size: 15.5px;

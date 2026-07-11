@@ -1,12 +1,13 @@
 # src/api/v1/api_keys.py
 """API key management endpoints (MongoDB)."""
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from src.auth.api_keys import generate_api_key

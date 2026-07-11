@@ -7,7 +7,6 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from src.services.cache_service import cache_get
 from src.config.settings import get_settings
 
 router = APIRouter(tags=["health"])

@@ -32,6 +32,27 @@ const LABEL_MAP = { quran: 'Quran', hadith: 'Hadith', tafsir: 'Tafsir' };
 const verseCache = {};
 
 /**
+ * Prefill the verse cache from backend-provided verse triplets so the UI can
+ * render without hitting the external AlQuran.cloud API. Any language the
+ * backend did not supply (often empty) is left for the async fetch to fill.
+ * @param {Array} triplets - backend verse_triplets [{surah_number, ayah, arabic, english, urdu}]
+ */
+function ingestVerseTriplets(triplets) {
+  if (!Array.isArray(triplets)) return;
+  triplets.forEach(t => {
+    if (!t || t.surah_number == null || t.ayah == null) return;
+    const key = `${t.surah_number}:${t.ayah}`;
+    const prev = verseCache[key] || {};
+    verseCache[key] = {
+      arabic: t.arabic || prev.arabic || '',
+      english: t.english || prev.english || '',
+      urdu: t.urdu || prev.urdu || '',
+      transliteration: prev.transliteration || '',
+    };
+  });
+}
+
+/**
  * Extract all citations from an answer string.
  * @param {string} text
  * @returns {{ raw:string, type:string, ref:string, url:string }[]}
@@ -374,11 +395,15 @@ function renderCitationCards(citations) {
     card.dataset.raw = c.raw;
     card.style.animationDelay = `${i * 60}ms`;
 
+    const verifiedEl = (c.type === 'quran')
+      ? '<span class="card-verified pending">… Verifying</span>'
+      : '<span class="card-verified">✓ Verified</span>';
+
     card.innerHTML = `
       <div class="card-source">
         <div class="card-icon ${c.type}">${ICON_MAP[c.type] || '📄'}</div>
         <span class="card-source-label ${c.type}">${LABEL_MAP[c.type] || 'Source'}</span>
-        <span class="card-verified">✓ Verified</span>
+        ${verifiedEl}
       </div>
       <div class="card-reference">${(c.ref || c.raw).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
       <div class="card-raw">${c.raw.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
@@ -386,6 +411,25 @@ function renderCitationCards(citations) {
     `;
 
     list.appendChild(card);
+
+    // For Quran cards, verify the reference through the backend and update the badge.
+    if (c.type === 'quran') {
+      const ref = parseQuranRef(c.raw);
+      if (ref) {
+        const badge = card.querySelector('.card-verified');
+        verifyQuranCitation(ref.surah, ref.ayah).then((r) => {
+          if (!badge) return;
+          if (r.verified) {
+            badge.classList.remove('pending');
+            badge.textContent = '✓ Verified';
+          } else {
+            badge.classList.remove('pending');
+            badge.classList.add('unverified');
+            badge.textContent = '⚠ Not verified';
+          }
+        });
+      }
+    }
   });
 
   // Update count badge
@@ -394,24 +438,42 @@ function renderCitationCards(citations) {
 }
 
 /**
- * Verify a Quran citation against the live AlQuran.cloud API.
- * Resolves to { verified, text, surahName } or { verified: false }.
+ * Verify a Quran citation. Goes through the backend /api/verify-citation
+ * proxy (which calls AlQuran.cloud) so the browser never needs a direct
+ * cross-origin request. Resolves to { verified, text, surahName } or
+ * { verified: false }.
  * @param {number} surah
  * @param {number} ayah
  */
 async function verifyQuranCitation(surah, ayah) {
   try {
-    const res  = await fetch(`https://api.alquran.cloud/v1/ayah/${surah}:${ayah}/en.yusufali`);
+    const base = window.__API_BASE__ || '';
+    const res  = await fetch(`${base}/api/verify-citation?q=${surah}:${ayah}`);
+    if (!res.ok) return { verified: false };
     const data = await res.json();
-    if (data.code === 200) {
+    if (data && data.verified) {
       return {
         verified:  true,
-        text:      data.data.text,
-        surahName: data.data.surah.englishName,
+        text:      data.text,
+        surahName: data.surahName,
       };
     }
     return { verified: false };
   } catch (e) {
     return { verified: false };
   }
+}
+
+/**
+ * Parse "surah:ayah" out of a Quran citation raw string such as
+ * "[Quran Al-Baqarah 2:255]". Returns { surah, ayah } or null.
+ * @param {string} raw
+ */
+function parseQuranRef(raw) {
+  const m = String(raw || '').match(/(\d+)\s*:\s*(\d+)/);
+  if (!m) return null;
+  const surah = parseInt(m[1], 10);
+  const ayah  = parseInt(m[2], 10);
+  if (surah < 1 || surah > 114 || ayah < 1) return null;
+  return { surah, ayah };
 }

@@ -3,9 +3,10 @@
 import json
 import re
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from src.agents.state import IslamicAgentState
+from src.core.islamic_vectorDB import COLLECTIONS
 
 logger = logging.getLogger("islamic-rag.classifier")
 
@@ -143,10 +144,11 @@ def classifier_node(state: IslamicAgentState, llm) -> Dict[str, Any]:
             else:
                 response_text = str(response)
 
-            # Clean up potential markdown
+            # Clean up potential markdown (```json ... ``` or ``` ... ```)
             response_text = response_text.strip()
             if response_text.startswith("```"):
-                response_text = response_text.split("\n", 1)[1]
+                # Drop the opening fence line (including any language tag like "json")
+                response_text = response_text.split("\n", 1)[1] if "\n" in response_text else response_text
                 if response_text.endswith("```"):
                     response_text = response_text[:-3]
                 response_text = response_text.strip()
@@ -154,8 +156,9 @@ def classifier_node(state: IslamicAgentState, llm) -> Dict[str, Any]:
             data = json.loads(response_text)
 
             sources = data.get("sources", [])
-            # Validate sources against known collections
-            valid_sources = [s for s in sources if s in KEYWORD_ROUTING]
+            # Validate sources against the real vector-store collections so all
+            # hadith collections (incl. dawud/tirmidhi/nasai/ibnmajah) are kept.
+            valid_sources = [s for s in sources if s in COLLECTIONS]
 
             if valid_sources:
                 return {

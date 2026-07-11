@@ -1,13 +1,15 @@
 # src/auth/dependencies.py
 """FastAPI dependencies for authentication and authorization (MongoDB)."""
 
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
-from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from src.auth.api_keys import hash_api_key
 from src.auth.jwt import decode_token
@@ -83,11 +85,16 @@ async def get_auth_context(
             detail="Invalid API key",
         )
 
-    if api_key_doc.get("expires_at") and api_key_doc["expires_at"] < __import__("datetime").datetime.utcnow():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key has expired",
-        )
+    expires_at = api_key_doc.get("expires_at")
+    if expires_at is not None:
+        # Normalize naive timestamps (MongoDB stores UTC) to aware UTC for comparison.
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key has expired",
+            )
 
     return AuthContext(
         user_id=api_key_doc.get("user_id", ""),

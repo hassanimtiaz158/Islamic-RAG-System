@@ -1,11 +1,12 @@
 # src/api/v1/tenants.py
 """Tenant management endpoints (admin only) (MongoDB)."""
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from src.auth.dependencies import AuthContext, require_role

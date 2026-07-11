@@ -1,23 +1,29 @@
 # src/db/database.py
-"""MongoDB async database connection using Motor."""
+"""MongoDB async database connection using Motor.
+
+Motor is imported lazily so the application can boot even when motor is not
+installed (the dependency is only required when a v1 endpoint is actually hit).
+"""
+
+from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from typing import Optional
-
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from src.config.settings import get_settings
 
 settings = get_settings()
 
-_client: Optional[AsyncIOMotorClient] = None
-_db: Optional[AsyncIOMotorDatabase] = None
+_client = None
+_db = None
 
 
-def get_database() -> AsyncIOMotorDatabase:
-    """Get MongoDB database instance."""
+def get_database():
+    """Get MongoDB database instance (Motor imported lazily)."""
     global _client, _db
     if _db is None:
+        from motor.motor_asyncio import AsyncIOMotorClient
+
         _client = AsyncIOMotorClient(settings.MONGODB_URL)
         _db = _client[settings.MONGODB_DB_NAME]
     return _db

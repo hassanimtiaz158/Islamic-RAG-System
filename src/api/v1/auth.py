@@ -1,13 +1,14 @@
 # src/api/v1/auth.py
 """Authentication endpoints: login, register, token refresh, me (MongoDB)."""
 
+from __future__ import annotations
+
 import re
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from src.auth.api_keys import generate_api_key
@@ -15,9 +16,8 @@ from src.auth.dependencies import AuthContext, get_auth_context
 from src.auth.jwt import create_access_token, create_refresh_token, decode_token
 from src.auth.passwords import hash_password, verify_password
 from src.db.database import get_database
-from src.db.models.tenant import Tenant
 from src.db.models.user import User, UserRole
-from src.services.tenant_service import create_tenant, get_default_tenant
+from src.services.tenant_service import create_tenant
 
 router = APIRouter(tags=["auth"])
 
@@ -135,7 +135,6 @@ async def login(req: LoginRequest, db: AsyncIOMotorDatabase = Depends(get_databa
 @router.post("/auth/refresh", response_model=TokenResponse)
 async def refresh_token(refresh_token: str, db: AsyncIOMotorDatabase = Depends(get_database)):
     """Refresh an access token using a refresh token."""
-    from datetime import datetime
     try:
         payload = decode_token(refresh_token)
         if payload.get("type") != "refresh":

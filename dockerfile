@@ -38,7 +38,11 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
-    VECTOR_STORE_PATH=/app/data/vectorstore
+    VECTOR_STORE_PATH=/app/data/vectorstore \
+    HF_HOME=/opt/venv/.cache/huggingface \
+    SENTENCE_TRANSFORMERS_HOME=/opt/venv/.cache/huggingface \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_OFFLINE=1
 
 WORKDIR /app
 
@@ -51,10 +55,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy virtual env from builder (includes pip packages + downloaded model)
 COPY --from=builder /opt/venv /opt/venv
+# The pre-downloaded embedding model lives inside the venv cache; make the
+# whole venv owned by the runtime user so sentence-transformers can read it
+# (and write lock/metadata files) without re-downloading the ~400MB model.
+RUN chown -R appuser:appgroup /opt/venv
 
 # Copy application code
 COPY src/ ./src/
-COPY _run_index.py .
+COPY frontend/ ./frontend/
 COPY requirements.txt .
 
 # Create data directories and set ownership

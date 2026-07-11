@@ -25,7 +25,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.islamic_vectorDB import IslamicVectorStore
-from src.core.islamic_chunker import get_hadith_splitter, get_tafsir_splitter, split_with_metadata
 from src.utils.citation_engine import extract_citations, verify_answer_grounding, check_islamic_safety
 
 
@@ -106,6 +105,7 @@ class EvaluationResult:
     generation_metrics: GenerationMetrics = field(default_factory=GenerationMetrics)
     latency_ms: float = 0.0
     error: str = ""
+    has_generation: bool = False   # False in retrieval-only mode (no graph)
 
 
 # ═══════════════════════════════════════════════
@@ -138,19 +138,29 @@ class RAGEvaluator:
         total_docs = sum(len(docs) for docs in all_retrieved.values())
         metrics.num_results = total_docs
 
-        # Diversity: unique collections that returned results
-        non_empty = sum(1 for docs in all_retrieved.values() if len(docs) > 0)
-        metrics.diversity = non_empty / max(len(expected_sources), 1)
+        # Collections that actually returned at least one document
+        counts = {col: len(docs) for col, docs in all_retrieved.items() if docs}
+        non_empty = len(counts)
 
-        # Precision: ratio of docs with score above threshold
-        above_threshold = sum(
-            1 for docs in all_retrieved.values()
-            for _, score in docs if score >= 0.3
-        )
-        metrics.precision = above_threshold / max(total_docs, 1)
-
-        # Recall approximation: did we get results from each expected source?
+        # Recall: fraction of expected sources that returned at least one doc
         metrics.recall = non_empty / max(len(expected_sources), 1)
+
+        # Diversity: how spread the retrieved docs are across collections.
+        # 1.0 = evenly distributed, 0.0 = everything came from a single collection.
+        if total_docs == 0:
+            metrics.diversity = 0.0
+        else:
+            max_share = max(counts.values()) / total_docs
+            metrics.diversity = 1.0 - max_share
+
+        # Precision: fraction of retrieved docs that are *highly* relevant.
+        # (retrieve_with_scores already filters out docs below the 0.3 floor,
+        # so a 0.3 cutoff would always be 1.0 — use a stricter 0.5 bar instead.)
+        highly_relevant = sum(
+            1 for docs in all_retrieved.values()
+            for _, score in docs if score >= 0.5
+        )
+        metrics.precision = highly_relevant / max(total_docs, 1)
 
         return metrics
 
@@ -174,9 +184,10 @@ class RAGEvaluator:
             )
             metrics.citation_validity = matched / len(expected_patterns)
 
-        # Faithfulness: grounding check
+        # Faithfulness: grounding check (confidence already reflects grounding,
+        # so do not penalise a second time when not grounded)
         is_grounded, _, confidence = verify_answer_grounding(response, context, citations)
-        metrics.faithfulness = confidence if is_grounded else confidence * 0.5
+        metrics.faithfulness = confidence
 
         # Citation coverage: ratio of sentences with citations
         sentences = response.split(".")
@@ -240,6 +251,7 @@ class RAGEvaluator:
                         response, context, test.expected_citation_patterns
                     )
                     result.generation_metrics = gen_metrics
+                    result.has_generation = True
 
                 else:
                     # Retrieval-only eval
@@ -280,18 +292,26 @@ class RAGEvaluator:
             print("No results to summarize.")
             return {}
 
+        gen_results = [r for r in self.results if r.has_generation]
+
         avg_latency = sum(r.latency_ms for r in self.results) / n
         avg_diversity = sum(r.retrieval_metrics.diversity for r in self.results) / n
         avg_recall = sum(r.retrieval_metrics.recall for r in self.results) / n
-        avg_faithfulness = sum(r.generation_metrics.faithfulness for r in self.results) / n
-        avg_citation_coverage = sum(r.generation_metrics.citation_coverage for r in self.results) / n
 
-        # Hallucination rate: responses with very low faithfulness
-        hallucination_count = sum(
-            1 for r in self.results
-            if r.generation_metrics.faithfulness < 0.5
-        )
-        hallucination_rate = hallucination_count / n
+        # Generation metrics are only meaningful when the graph actually ran.
+        # In retrieval-only mode there is no answer to evaluate, so we must not
+        # report a 100% hallucination rate based on default 0.0 faithfulness.
+        if gen_results:
+            avg_faithfulness = sum(r.generation_metrics.faithfulness for r in gen_results) / len(gen_results)
+            avg_citation_coverage = sum(r.generation_metrics.citation_coverage for r in gen_results) / len(gen_results)
+            hallucination_count = sum(
+                1 for r in gen_results if r.generation_metrics.faithfulness < 0.5
+            )
+            hallucination_rate = hallucination_count / len(gen_results)
+        else:
+            avg_faithfulness = 0.0
+            avg_citation_coverage = 0.0
+            hallucination_rate = 0.0
 
         # Error rate
         error_count = sum(1 for r in self.results if r.error)
@@ -299,6 +319,7 @@ class RAGEvaluator:
 
         summary = {
             "total_queries": n,
+            "generation_evaluated": len(gen_results),
             "avg_latency_ms": round(avg_latency, 1),
             "avg_retrieval_diversity": round(avg_diversity, 3),
             "avg_retrieval_recall": round(avg_recall, 3),
@@ -312,18 +333,25 @@ class RAGEvaluator:
         print(f"  Avg latency:          {avg_latency:.0f}ms")
         print(f"  Retrieval diversity:  {avg_diversity:.3f}")
         print(f"  Retrieval recall:     {avg_recall:.3f}")
-        print(f"  Faithfulness:         {avg_faithfulness:.3f}")
-        print(f"  Citation coverage:    {avg_citation_coverage:.3f}")
-        print(f"  Hallucination rate:   {hallucination_rate:.1%}")
+        if gen_results:
+            print(f"  Faithfulness:         {avg_faithfulness:.3f}")
+            print(f"  Citation coverage:    {avg_citation_coverage:.3f}")
+            print(f"  Hallucination rate:   {hallucination_rate:.1%}")
+        else:
+            print("  Faithfulness:         N/A (retrieval-only mode, no generation)")
+            print("  Hallucination rate:   N/A (retrieval-only mode, no generation)")
         print(f"  Error rate:           {error_rate:.1%}")
         print("=" * 70)
 
-        # Grade
-        grade = "A" if avg_faithfulness >= 0.8 and hallucination_rate < 0.1 else \
-                "B" if avg_faithfulness >= 0.6 and hallucination_rate < 0.2 else \
-                "C" if avg_faithfulness >= 0.4 and hallucination_rate < 0.3 else "D"
-        print(f"\n  🏆 Overall Grade: {grade}")
-        print(f"     (Faithfulness >= 0.8, Hallucination < 10% = A)")
+        # Grade (only meaningful when generation was actually evaluated)
+        if gen_results:
+            grade = "A" if avg_faithfulness >= 0.8 and hallucination_rate < 0.1 else \
+                    "B" if avg_faithfulness >= 0.6 and hallucination_rate < 0.2 else \
+                    "C" if avg_faithfulness >= 0.4 and hallucination_rate < 0.3 else "D"
+            print(f"\n  🏆 Overall Grade: {grade}")
+            print(f"     (Faithfulness >= 0.8, Hallucination < 10% = A)")
+        else:
+            print("\n  🏆 Grade: N/A (run with a working LLM/graph for a full grade)")
         print("=" * 70)
 
         return summary

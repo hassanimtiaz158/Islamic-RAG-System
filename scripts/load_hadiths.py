@@ -6,12 +6,17 @@ import requests
 from langchain_core.documents import Document
 
 API_KEY = os.getenv("HADITH_API_KEY", "")
-if not API_KEY:
-    raise RuntimeError(
-        "HADITH_API_KEY environment variable is required. "
-        "Get a free key at https://hadithapi.com and set it via:\n"
-        "  export HADITH_API_KEY=your_key_here"
-    )
+
+
+def _require_api_key() -> str:
+    """Return the Hadith API key, raising only when actually needed."""
+    if not API_KEY:
+        raise RuntimeError(
+            "HADITH_API_KEY environment variable is required. "
+            "Get a free key at https://hadithapi.com and set it via:\n"
+            "  export HADITH_API_KEY=your_key_here"
+        )
+    return API_KEY
 
 # Corrected slugs for HadithAPI.com
 HADITH_COLLECTIONS = {
@@ -84,6 +89,7 @@ def load_hadith_collection(collection_key: str) -> list[Document]:
             f"Available: {list(HADITH_COLLECTIONS.keys())}"
         )
 
+    api_key = _require_api_key()
     base_url = "https://hadithapi.com/api/hadiths"
     documents = []
     page = 1
@@ -93,7 +99,7 @@ def load_hadith_collection(collection_key: str) -> list[Document]:
 
     while True:
         params = {
-            "apiKey": API_KEY,
+            "apiKey": api_key,
             "book": HADITH_COLLECTIONS[collection_key],
             "paginate": 50,
             "page": page,

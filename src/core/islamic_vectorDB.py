@@ -1,4 +1,4 @@
-# src/core/islamic_vectorstore.py
+# src/core/islamic_vectorDB.py
 
 import threading
 import logging
@@ -77,6 +77,14 @@ class IslamicVectorStore:
             )
         return self._stores[collection_name]
 
+    def get_retriever(self, collection_name: str, k: int = 5):
+        """Return a LangChain retriever for the given collection.
+
+        Used by tests and scripts that expect a `VectorStoreRetriever`.
+        """
+        store = self.get_store(collection_name)
+        return store.as_retriever(search_kwargs={"k": k})
+
     def index_documents(
         self,
         collection_name: str,
@@ -98,16 +106,12 @@ class IslamicVectorStore:
         collection_name: str,
         query: str,
         k: int = 5,
-        tenant_id: Optional[str] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve documents with relevance scores.
         Returns list of (Document, score) tuples, filtered by threshold.
-        tenant_id: optional filter for per-tenant collections.
         """
-        # Resolve actual collection name (tenant-scoped if tenant_id provided)
-        actual_collection = self._resolve_collection(collection_name, tenant_id)
-        store = self.get_store(actual_collection)
+        store = self.get_store(collection_name)
         with EMBED_LOCK:
             results = store.similarity_search_with_relevance_scores(
                 query, k=k
@@ -174,18 +178,11 @@ class IslamicVectorStore:
         except Exception:
             return 0
 
-    def _resolve_collection(self, collection_name: str, tenant_id: Optional[str] = None) -> str:
-        """Resolve collection name, applying tenant scoping if needed.
+    def _resolve_collection(self, collection_name: str) -> str:
+        """Resolve the collection name to use.
 
         Shared collections (quran, hadith_*, tafsir, fiqh, seerah) are global.
         User uploads and custom collections are tenant-scoped.
         """
-        shared_collections = {"quran", "hadith_bukhari", "hadith_muslim", "hadith_dawud",
-                              "hadith_tirmidhi", "hadith_nasai", "hadith_ibnmajah",
-                              "tafsir", "fiqh", "seerah"}
-
-        if collection_name in shared_collections or tenant_id is None:
-            return collection_name
-
-        return f"tenant_{tenant_id}_{collection_name}"
+        return collection_name
 
