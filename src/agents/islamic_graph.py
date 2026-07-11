@@ -23,37 +23,242 @@ from src.utils.citation_engine import (
 )
 from src.utils.translator import translate_query_to_english, translate_response_to_language
 
-load_dotenv()
+load_dotenv(override=True)
 logger = logging.getLogger("islamic-rag")
 
 
 # ═══════════════════════════════════════════════
-# MODEL INITIALIZATION (Groq only)
+# MODEL INITIALIZATION (supports groq, openai, ollama, anthropic)
 # ═══════════════════════════════════════════════
 def _get_llm():
-    """Get an LLM from Groq."""
-    model = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-    api_key = os.getenv("GROQ_API_KEY", "")
+    """Get an LLM based on LLM_PROVIDER env var.
 
-    if not api_key:
+    Falls back to a local Ollama instance in development when the
+    configured provider has no API key set.
+    """
+    provider = os.getenv("LLM_PROVIDER", "groq").lower()
+    model = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+    env = os.getenv("ENVIRONMENT", "development").lower()
+
+    def _try_ollama_fallback():
+        """Attempt to use local Ollama as a dev fallback."""
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        try:
+            from langchain_ollama import ChatOllama
+            fallback_model = os.getenv("LLM_MODEL", "phi3:latest")
+            logger.warning(
+                f"No API key for {provider} — falling back to Ollama ({fallback_model})"
+            )
+            return ChatOllama(model=fallback_model, base_url=base_url, temperature=0.0)
+        except Exception as e:
+            raise RuntimeError(
+                f"No API key for {provider} and Ollama fallback failed: {e}"
+            )
+
+    if provider == "groq":
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            if env != "production":
+                return _try_ollama_fallback()
+            raise RuntimeError(
+                "GROQ_API_KEY is required. "
+                "Get a free key at https://console.groq.com and set it in .env"
+            )
+        try:
+            from langchain_groq import ChatGroq
+            return ChatGroq(model=model, temperature=0.0, groq_api_key=api_key)
+        except ImportError:
+            raise RuntimeError("langchain-groq not installed. Run: pip install langchain-groq")
+        except Exception as e:
+            raise RuntimeError(f"Groq LLM init failed: {e}")
+
+    elif provider == "openai":
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        if not api_key:
+            if env != "production":
+                return _try_ollama_fallback()
+            raise RuntimeError("OPENAI_API_KEY is required. Set it in .env")
+        try:
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(model=model, temperature=0.0, openai_api_key=api_key)
+        except ImportError:
+            raise RuntimeError("langchain-openai not installed. Run: pip install langchain-openai")
+        except Exception as e:
+            raise RuntimeError(f"OpenAI LLM init failed: {e}")
+
+    elif provider == "ollama":
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        try:
+            from langchain_ollama import ChatOllama
+            return ChatOllama(model=model, base_url=base_url, temperature=0.0)
+        except ImportError:
+            raise RuntimeError("langchain-ollama not installed. Run: pip install langchain-ollama")
+        except Exception as e:
+            raise RuntimeError(f"Ollama LLM init failed: {e}")
+
+    elif provider == "anthropic":
+        api_key = os.getenv("ANTHROPIC_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+        if not api_key:
+            if env != "production":
+                return _try_ollama_fallback()
+            raise RuntimeError("ANTHROPIC_API_KEY is required. Set it in .env")
+        try:
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(model=model, temperature=0.0, anthropic_api_key=api_key)
+        except ImportError:
+            raise RuntimeError("langchain-anthropic not installed. Run: pip install langchain-anthropic")
+        except Exception as e:
+            raise RuntimeError(f"Anthropic LLM init failed: {e}")
+
+    else:
         raise RuntimeError(
-            "GROQ_API_KEY is required. "
-            "Get a free key at https://console.groq.com and set it in .env"
+            f"Unknown LLM_PROVIDER: '{provider}'. Supported: groq, openai, ollama, anthropic"
         )
 
-    try:
-        from langchain_groq import ChatGroq
-        return ChatGroq(
-            model=model,
-            temperature=0.0,
-            groq_api_key=api_key,
-        )
-    except ImportError:
-        raise RuntimeError(
-            "langchain-groq not installed. Run: pip install langchain-groq"
-        )
-    except Exception as e:
-        raise RuntimeError(f"Groq LLM init failed: {e}")
+
+# ═══════════════════════════════════════════════
+# ISLAMIC TERM TRANSLITERATION MAP
+# Maps common romanized Urdu/Arabic terms to their English equivalents
+# so users can search using familiar terms like "namaz", "zakat", "wudu"
+# and still match English content in the vector store.
+# ═══════════════════════════════════════════════
+ISLAMIC_TERM_MAP = {
+    # Prayer & Worship
+    "namaz": "prayer salah",
+    "salah": "prayer salah",
+    "salat": "prayer salah",
+    "wudu": "ablution wudu",
+    "wuzu": "ablution wudu",
+    "ghusl": "bath purification",
+    "tayammum": "dry ablution",
+    "adhan": "call to prayer",
+    "azaan": "call to prayer",
+    "iqamah": "iqamah prayer call",
+    "jumuah": "friday prayer",
+    "jummah": "friday prayer",
+    "eid": "eid prayer festival",
+    "taraweeh": "taraweeh night prayer",
+    "tahajjud": "night prayer",
+    "sujood": "prostration",
+    "ruku": "bowing prayer",
+    "qiblah": "direction of prayer",
+    # Pillars & Charity
+    "zakat": "zakat charity",
+    "zakah": "zakat charity",
+    "sadaqah": "voluntary charity",
+    "sadqa": "charity",
+    "khums": "khums one-fifth",
+    "ushr": "ushr tithe",
+    # Fasting
+    "roza": "fasting",
+    "rozah": "fasting",
+    "sawm": "fasting",
+    "iftar": "breaking fast",
+    "sehri": "pre-dawn meal fasting",
+    "suhoor": "pre-dawn meal fasting",
+    "tawaf": "circumambulation kaaba",
+    "hajj": "pilgrimage hajj",
+    "umrah": "umrah pilgrimage",
+    # Faith & Theology
+    "iman": "faith belief",
+    "tawhid": "monotheism oneness of God",
+    "shirk": "polytheism associating with God",
+    "kufr": "disbelief",
+    "nifaq": "hypocrisy",
+    "tawbah": "repentance",
+    "istighfar": "seeking forgiveness",
+    "shukr": "gratitude",
+    "sabr": "patience",
+    "tawakkul": "trust in God",
+    "khushu": "humility in prayer",
+    # Quran & Hadith
+    "quran": "Quran",
+    "surah": "surah chapter",
+    "ayat": "verses",
+    "ayah": "verse",
+    "hadith": "hadith prophetic tradition",
+    "sunnah": "sunnah prophetic practice",
+    "dua": "supplication prayer",
+    "duaa": "supplication prayer",
+    "dhikr": "remembrance of God",
+    "tasbih": "glorification of God",
+    # Fiqh / Purity
+    "halal": "permissible",
+    "haram": "prohibited",
+    "makruh": "disliked",
+    "mustahabb": "recommended",
+    "wajib": "obligatory",
+    "fard": "obligatory",
+    "nafl": "voluntary prayer",
+    "janabat": "ritual impurity",
+    "haydh": "menstruation",
+    # Food & Drink
+    "halal food": "permissible food",
+    "haram food": "prohibited food",
+    "zabihah": "slaughtered meat",
+    "dhabihah": "slaughtered meat",
+    # General
+    "rasool": "messenger prophet",
+    "rasul": "messenger prophet",
+    "sallallahu alayhi wasallam": "peace be upon him",
+    "pbuh": "peace be upon him",
+    "alayhis salaam": "peace be upon him",
+    "radiyallahu anhu": "may Allah be pleased with him",
+    "inshallah": "if Allah wills",
+    "inshaallah": "if Allah wills",
+    "mashallah": "what Allah has willed",
+    "alhamdulillah": "praise be to Allah",
+    "bismillah": "in the name of Allah",
+    "subhanallah": "glory be to Allah",
+    "allahu akbar": "Allah is the greatest",
+    "jazakallah": "may Allah reward you",
+    "astaghfirullah": "I seek forgiveness from Allah",
+}
+
+
+def _normalize_islamic_terms(query: str) -> str:
+    """
+    Replace common romanized Islamic terms in a query with their English equivalents.
+    Uses whole-word matching to avoid false substitutions.
+    Works regardless of the user's selected language (en/ar/ur).
+    Deduplicates overlapping expansions so "namaz" → "prayer salah"
+    doesn't compound with "salah" already being replaced.
+    """
+    if not query.strip():
+        return query
+
+    normalized = query.lower()
+
+    # Sort terms by length (longest first) so we match "salah" before "sala"
+    # and prevent partial re-matching against already-replaced text.
+    sorted_terms = sorted(ISLAMIC_TERM_MAP.keys(), key=len, reverse=True)
+
+    # Track character positions that have already been replaced
+    # Strategy: replace with placeholder first, then substitute at the end
+    placeholders = {}
+    placeholder_idx = 0
+    for term in sorted_terms:
+        pattern = r'\b' + re.escape(term) + r'\b'
+        placeholder = f"\x00ISAIDX{placeholder_idx}\x00"
+        placeholders[placeholder] = ISLAMIC_TERM_MAP[term]
+        normalized = re.sub(pattern, placeholder, normalized)
+        placeholder_idx += 1
+
+    # Now replace placeholders with the actual English expansions
+    for placeholder, english in placeholders.items():
+        normalized = normalized.replace(placeholder, " " + english + " ")
+
+    # Clean up multiple spaces
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+    # De-duplicate consecutive identical words ("prayer prayer" → "prayer")
+    words = normalized.split()
+    deduped = []
+    for w in words:
+        if not deduped or w != deduped[-1]:
+            deduped.append(w)
+
+    return " ".join(deduped)
 
 
 # ═══════════════════════════════════════════════
@@ -193,33 +398,48 @@ def _build_context_with_citations(retrieved_docs: dict) -> tuple:
 def translate_query_node(llm):
     """
     Translates non-English queries to English for vector search.
-    The vector store has English content, so Urdu/Arabic queries must be translated first.
+    Also normalizes romanized Islamic terms (e.g. "namaz" → "prayer salah")
+    in ALL queries regardless of language, so users can use familiar terms.
+
+    The vector store has English content, so non-English queries must be
+    translated first. Romanized Islamic terms in English queries are also mapped
+    to their English equivalents.
     """
     def node(state: IslamicAgentState) -> Dict[str, Any]:
         language = state.get("language", "en")
         original_query = state.get("query", "")
 
-        if language == "en" or not original_query.strip():
+        if not original_query.strip():
             return {
                 "original_query": original_query,
                 "translated_query": original_query,
             }
 
+        normalized_query = _normalize_islamic_terms(original_query)
+
+        if language == "en":
+            # For English queries, only apply term normalization (no LLM call)
+            return {
+                "original_query": original_query,
+                "translated_query": normalized_query,
+            }
+
+        # For non-English queries, normalize terms first then translate via LLM
         try:
-            translated = translate_query_to_english(original_query, language, llm)
+            translated = translate_query_to_english(normalized_query, language, llm)
             logger.info(
                 f"Query translated ({language} → en): "
-                f"'{original_query[:60]}...' → '{translated[:60]}...'"
+                f"'{original_query[:60]}' → '{translated[:60]}'"
             )
             return {
                 "original_query": original_query,
                 "translated_query": translated,
             }
         except Exception as e:
-            logger.warning(f"Query translation failed: {e}. Using original query.")
+            logger.warning(f"Query translation failed: {e}. Using normalized query.")
             return {
                 "original_query": original_query,
-                "translated_query": original_query,
+                "translated_query": normalized_query,
             }
 
     return node

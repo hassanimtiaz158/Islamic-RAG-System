@@ -94,7 +94,7 @@ KEYWORD_ROUTING = {
         # English
         "halal", "haram", "ruling", "fatwa", "permitted", "prohibited",
         "obligatory", "recommended", "makruh", "is it allowed",
-        "islamic law", "sharia", "fiqh",
+        "islamic law", "sharia", "fiqh", "prayer", "namaz", "salah",
         # Arabic
         "حلال", "حرام", "حكم", "فتوى", "جائز", "محرم",
         "واجب", "مستحب", "مكروه", "هل يجوز", "الشريعة", "الفقه",
@@ -129,10 +129,11 @@ def classifier_node(state: IslamicAgentState, llm) -> Dict[str, Any]:
 
     # Fast path: keyword-based routing (no LLM call)
     keyword_result = _keyword_classify(query)
-    if keyword_result["routing"] != ["quran", "hadith_bukhari"] or not query.strip():
+    if keyword_result["routing"] != ["quran", "hadith_bukhari"] and query.strip():
+        # Keywords matched specific sources — use them directly
         return keyword_result
 
-    # If keywords matched default fallback, try LLM for better routing
+    # Keywords fell back to default — try LLM for better routing
     if llm is not None and query.strip():
         try:
             response = llm.invoke(CLASSIFY_PROMPT.format(query=query))

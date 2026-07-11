@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # render-build.sh
-# Build script for Render deployment
-# Handles heavy dependencies gracefully on Render's free tier
+# Pre-build script for local development (NOT used by Render deployment).
+# Render builds directly from Dockerfile which downloads the model in the builder stage.
+# Run this locally to pre-download the embedding model for faster Docker builds.
 
 set -e
 
-echo "=== Installing Python dependencies ==="
-pip install --no-cache-dir -r requirements.txt
+echo "=== Pre-downloading embedding model ==="
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
-echo "=== Build complete ==="
+echo "=== Embedding model ready ==="
+echo "=== You can now run: docker build -t islamic-rag . ==="

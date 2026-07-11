@@ -57,11 +57,48 @@ document.addEventListener('DOMContentLoaded', () => {
   restoreLang();
   restoreChatHistory();
   connectWebSocket();
+  checkBackendHealth();
 
   document.getElementById('queryInput').addEventListener('input', function () {
     autoResize(this);
   });
 });
+
+/* ═══════════════════════════════════════════════
+   BACKEND HEALTH CHECK
+═══════════════════════════════════════════════ */
+let _healthCheckTimer = null;
+
+async function checkBackendHealth() {
+  try {
+    const res = await fetch(`${API_BASE}/api/health`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.rag_available) {
+        setStatus('online', 'Connected to backend (RAG ready)');
+      } else if (data.rag_error) {
+        // Backend is up but RAG failed to init — show actionable error
+        const errMsg = data.rag_error;
+        const actionHint = errMsg.includes('API key') || errMsg.includes('required')
+          ? ' Set your API key in .env or ensure Ollama is running.'
+          : '';
+        setStatus('error', `RAG error: ${errMsg}${actionHint}`);
+      } else {
+        setStatus('warning', 'Connected — RAG pipeline loading…');
+        // Retry in 3s until RAG is ready
+        if (_healthCheckTimer) clearTimeout(_healthCheckTimer);
+        _healthCheckTimer = setTimeout(checkBackendHealth, 3000);
+      }
+    } else {
+      setStatus('warning', 'Backend unavailable — using local knowledge');
+    }
+  } catch (e) {
+    setStatus('warning', 'Backend unavailable — using local knowledge');
+  }
+}
 
 /* ═══════════════════════════════════════════════
    DARK / LIGHT MODE
@@ -167,8 +204,18 @@ function connectWebSocket() {
 
   try {
     ws = new WebSocket(WS_URL);
+    // Timeout if connection doesn't open within 5s
+    const connTimeout = setTimeout(() => {
+      if (ws && ws.readyState !== WebSocket.OPEN) {
+        console.warn('[WS] Connection timeout');
+        try { ws.close(); } catch (e) { /* ignore */ }
+        ws = null;
+        setStatus('warning', 'WebSocket timeout — using REST');
+      }
+    }, 5000);
 
     ws.onopen = () => {
+      clearTimeout(connTimeout);
       setStatus('online', 'Connected to backend');
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -193,12 +240,14 @@ function connectWebSocket() {
     };
 
     ws.onerror = () => {
+      clearTimeout(connTimeout);
       console.warn('[WS] WebSocket error — will use REST fallback');
       setStatus('warning', 'WebSocket failed, using REST');
       ws = null;
     };
 
     ws.onclose = () => {
+      clearTimeout(connTimeout);
       console.log('[WS] Connection closed');
       ws = null;
       scheduleReconnect();
@@ -340,11 +389,16 @@ async function sendQuery() {
   // ── REST fallback ──
   try {
     setStatus('warning', 'Querying backend via REST…');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for RAG
+
     const res = await fetch(`${API_BASE}/api/ask`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, language: currentLang, sources, conversation_id: currentConversationId || '' }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
@@ -352,7 +406,7 @@ async function sendQuery() {
     }
 
     const data     = await res.json();
-    const answer   = data.answer || data.response || '';
+    const answer   = data.answer || '';
     const citCards = data.citation_cards || [];
 
     // Capture conversation ID for multi-turn
@@ -372,8 +426,11 @@ async function sendQuery() {
     // Build enhanced meta with new fields
     const enhancedData = {
       ...data,
-      follow_up_questions: data.follow_up_questions || [],
-      verse_triplets: data.verse_triplets || [],
+      citation_valid: data.citation_valid !== undefined ? data.citation_valid : citations.length > 0,
+      confidence_score: data.confidence_score || 0,
+      verification_passed: data.verification_passed || false,
+      source_types: data.source_types || [],
+      safety_flags: data.safety_flags || [],
     };
 
     removeTypingIndicator();
@@ -385,12 +442,16 @@ async function sendQuery() {
     console.warn('[REST] Backend error:', err.message);
     setStatus('warning', 'Backend unavailable — using local knowledge');
 
+    const errorMsg = err.name === 'AbortError'
+      ? 'The server took too long to respond. The RAG pipeline may be loading — try again in a moment.'
+      : null;
     const demo      = getDemoAnswer(query);
     const citations = extractCitations(demo);
     removeTypingIndicator();
-    addAssistantBubbleEnhanced(demo, citations, {
+    const introMsg = errorMsg ? `${errorMsg}\n\n` : '';
+    addAssistantBubbleEnhanced(`${introMsg}${demo}`, citations, {
       citation_valid: citations.length > 0,
-      confirmation_score: 0.3,
+      confidence_score: 0.3,
       verification_passed: false,
       source_types: [],
       safety_flags: [],

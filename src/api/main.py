@@ -5,6 +5,7 @@ Provides chat/query, document upload, citation verification, and health check.
 SaaS Edition: multi-tenant, auth-ready, Redis-cached.
 """
 
+import asyncio
 import os
 import threading
 import logging
@@ -18,8 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (override=True so .env changes are picked up on reload)
+load_dotenv(override=True)
 
 # ── Logging Configuration ──
 logging.basicConfig(
@@ -30,10 +31,10 @@ logging.basicConfig(
 logger = logging.getLogger("islamic-rag")
 
 # ── Environment (legacy — prefer src.config.settings for new code) ──
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "phi3")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+from src.config.settings import get_settings as _get_settings
+_llm_settings = _get_settings()
+LLM_PROVIDER = _llm_settings.LLM_PROVIDER
+LLM_MODEL = _llm_settings.LLM_MODEL
 
 # ── CORS: allowed origins from env (comma-separated), default to localhost only ──
 _allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:8000")
@@ -128,25 +129,29 @@ def _build_conversation_context(conversation_id: str, current_query: str) -> tup
 vector_store = None
 graph = None
 _rag_initialized = False
+_rag_error: str = ""
 _rag_init_lock = threading.Lock()
 
 
 def _init_rag():
     """Lazy initialization of the RAG pipeline."""
-    global vector_store, graph, _rag_initialized
+    global vector_store, graph, _rag_initialized, _rag_error
     with _rag_init_lock:
         if _rag_initialized:
             return
-        _rag_initialized = True
     try:
         from src.core.islamic_vectorDB import IslamicVectorStore
         from src.agents.islamic_graph import build_islamic_graph
 
         vector_store = IslamicVectorStore()
         graph = build_islamic_graph(vector_store)
+        with _rag_init_lock:
+            _rag_initialized = True
+            _rag_error = ""
         logger.info("RAG pipeline initialized successfully")
     except Exception as e:
-        logger.warning(f"RAG pipeline not available: {e}")
+        _rag_error = str(e)
+        logger.error(f"RAG pipeline initialization failed: {e}", exc_info=True)
         logger.warning("Using fallback demo mode.")
 
 
@@ -221,6 +226,7 @@ class QueryResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     rag_available: bool
+    rag_error: str = ""
     llm_provider: str
     llm_model: str
     version: str = "2.0.0"
@@ -383,6 +389,7 @@ async def health_check():
     return HealthResponse(
         status="ok",
         rag_available=graph is not None,
+        rag_error=_rag_error,
         llm_provider=LLM_PROVIDER,
         llm_model=LLM_MODEL,
         version="2.0.0",
@@ -585,37 +592,40 @@ async def index_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Indexing failed due to an internal error.")
 
 
+# Surah ayah count limits (module-level constant to avoid per-request allocation)
+AYAH_LIMITS = {
+    1: 7, 2: 286, 3: 200, 4: 176, 5: 120, 6: 165, 7: 206, 8: 75, 9: 129, 10: 109,
+    11: 123, 12: 111, 13: 43, 14: 52, 15: 99, 16: 128, 17: 111, 18: 110, 19: 98, 20: 135,
+    21: 112, 22: 78, 23: 118, 24: 64, 25: 77, 26: 227, 27: 93, 28: 88, 29: 69, 30: 60,
+    31: 34, 32: 30, 33: 73, 34: 54, 35: 85, 36: 83, 37: 182, 38: 88, 39: 75, 40: 85,
+    41: 54, 42: 53, 43: 89, 44: 59, 45: 37, 46: 35, 47: 38, 48: 29, 49: 18, 50: 45,
+    51: 60, 52: 49, 53: 62, 54: 55, 55: 78, 56: 96, 57: 29, 58: 22, 59: 24, 60: 14,
+    61: 14, 62: 11, 63: 11, 64: 18, 65: 12, 66: 12, 67: 30, 68: 52, 69: 52, 70: 44,
+    71: 28, 72: 28, 73: 20, 74: 56, 75: 40, 76: 31, 77: 50, 78: 40, 79: 46, 80: 42,
+    81: 29, 82: 19, 83: 36, 84: 25, 85: 22, 86: 17, 87: 19, 88: 62, 89: 30, 90: 20,
+    91: 15, 92: 21, 93: 11, 94: 8, 95: 8, 96: 19, 97: 5, 98: 88, 99: 83, 100: 111,
+    101: 11, 102: 8, 103: 9, 104: 7, 105: 5, 106: 4, 107: 7, 108: 3, 109: 6, 110: 6,
+    111: 5, 112: 4, 113: 5, 114: 6,
+}
+
+
 @app.get("/api/verify-citation")
 async def verify_citation(surah: int = Query(..., ge=1, le=114), ayah: int = Query(..., ge=1, le=286)):
     """Verify a Quran citation and return Arabic + English text."""
-    import requests
-
-    # Validate surah-specific ayah limits
-    AYAH_LIMITS = {
-        1: 7, 2: 286, 3: 200, 4: 176, 5: 120, 6: 165, 7: 206, 8: 75, 9: 129, 10: 109,
-        11: 123, 12: 111, 13: 43, 14: 52, 15: 99, 16: 128, 17: 111, 18: 110, 19: 98, 20: 135,
-        21: 112, 22: 78, 23: 118, 24: 64, 25: 77, 26: 227, 27: 93, 28: 88, 29: 69, 30: 60,
-        31: 34, 32: 30, 33: 73, 34: 54, 35: 85, 36: 83, 37: 182, 38: 88, 39: 75, 40: 85,
-        41: 54, 42: 53, 43: 89, 44: 59, 45: 37, 46: 35, 47: 38, 48: 29, 49: 18, 50: 45,
-        51: 60, 52: 49, 53: 62, 54: 55, 55: 78, 56: 96, 57: 29, 58: 22, 59: 24, 60: 14,
-        61: 14, 62: 11, 63: 11, 64: 18, 65: 12, 66: 12, 67: 30, 68: 52, 69: 52, 70: 44,
-        71: 28, 72: 28, 73: 20, 74: 56, 75: 40, 76: 31, 77: 50, 78: 40, 79: 46, 80: 42,
-        81: 29, 82: 19, 83: 36, 84: 25, 85: 22, 86: 17, 87: 19, 88: 62, 89: 30, 90: 20,
-        91: 15, 92: 21, 93: 11, 94: 8, 95: 8, 96: 19, 97: 5, 98: 88, 99: 83, 100: 111,
-        101: 11, 102: 8, 103: 9, 104: 7, 105: 5, 106: 4, 107: 7, 108: 3, 109: 6, 110: 6,
-        111: 5, 112: 4, 113: 5, 114: 6,
-    }
     max_ayahs = AYAH_LIMITS.get(surah, 286)
     if ayah > max_ayahs:
         return {"verified": False, "error": f"Surah {surah} has only {max_ayahs} ayahs"}
 
     try:
-        # Fetch both Arabic and English in parallel
+        import httpx
         arabic_url = f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}"
         english_url = f"https://api.alquran.cloud/v1/ayah/{surah}:{ayah}/en.yusufali"
 
-        arabic_resp = requests.get(arabic_url, timeout=10)
-        english_resp = requests.get(english_url, timeout=10)
+        async with httpx.AsyncClient(timeout=10) as client:
+            arabic_resp, english_resp = await asyncio.gather(
+                client.get(arabic_url),
+                client.get(english_url),
+            )
 
         result = {"verified": False}
 
@@ -635,10 +645,10 @@ async def verify_citation(surah: int = Query(..., ge=1, le=114), ayah: int = Que
             result["error"] = "Verse not found"
         return result
 
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         logger.warning(f"verify-citation timeout for {surah}:{ayah}")
         return {"verified": False, "error": "External API request timed out"}
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         logger.warning(f"verify-citation connection error for {surah}:{ayah}")
         return {"verified": False, "error": "Could not reach external API"}
     except Exception as e:
@@ -672,20 +682,44 @@ async def translate_verse(req: TranslateVerseRequest):
 # =========================
 # WEBSOCKET STREAMING
 # =========================
+# Per-connection rate limiter state
+_WS_RATE_LIMIT = 10  # max messages per window
+_WS_RATE_WINDOW = 10  # seconds
+
+
 @app.websocket("/ws/ask")
 async def ws_ask(ws: WebSocket):
     """WebSocket endpoint for streaming answers."""
     await ws.accept()
     _init_rag()
 
+    # Rate limiting state
+    _msg_timestamps: list = []
+
     try:
         while True:
+            # Enforce rate limit
+            now = time.time()
+            _msg_timestamps = [t for t in _msg_timestamps if now - t < _WS_RATE_WINDOW]
+            if len(_msg_timestamps) >= _WS_RATE_LIMIT:
+                await ws.send_json({
+                    "type": "error",
+                    "message": f"Rate limit exceeded. Max {_WS_RATE_LIMIT} messages per {_WS_RATE_WINDOW}s.",
+                })
+                await ws.close()
+                break
+            _msg_timestamps.append(now)
+
             data = await ws.receive_json()
             query = data.get("query", "")
             language = data.get("language", "en")
 
             if not query.strip():
                 await ws.send_json({"type": "error", "message": "Empty query"})
+                continue
+
+            if len(query) > 2000:
+                await ws.send_json({"type": "error", "message": "Query too long. Maximum 2000 characters."})
                 continue
 
             if graph is not None:

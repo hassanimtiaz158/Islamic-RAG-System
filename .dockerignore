@@ -1,0 +1,67 @@
+# Version control
+.git
+.gitignore
+
+# Environment / secrets
+.env
+.env.*
+.env.local
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+*.egg-info
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Data (vector store is 400MB+ and gitignored — never copy into image)
+data/
+vectorstore/
+vectorstore*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DVC
+.dvc/cache
+.dvc/tmp
+*.dvc
+
+# Logs
+*.log
+
+# Tests / scripts (not needed in production image)
+scripts/
+tests/
+
+# Frontend (served separately on Vercel)
+frontend/
+
+# Docker meta
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Misc
+*.md
+!README.md
+nul
+touch
+.claude/
+.vercel/
+.vercel.json

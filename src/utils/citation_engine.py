@@ -286,11 +286,6 @@ def check_islamic_safety(response: str, citations: List[Dict[str, Any]]) -> List
             flags.append("sensitive_topic")
             break
 
-    # Check for potential fabrication indicators
-    if re.search(r"\[Quran\s+\d+:\d+\]", response):
-        # Citation without surah name — non-standard format
-        flags.append("non_standard_citation_format")
-
     return flags
 
 

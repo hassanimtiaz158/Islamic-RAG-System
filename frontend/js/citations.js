@@ -246,7 +246,7 @@ async function fetchVerseTriplet(surah, ayah) {
     // Fetch Urdu translation from backend
     if (result.english) {
       try {
-        const urduRes = await fetch(`${window.__API_BASE__ || ''}/api/translate-verse`, {
+        const urduRes = await fetch(`${API_BASE}/api/translate-verse`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: result.english, target_lang: 'ur' }),

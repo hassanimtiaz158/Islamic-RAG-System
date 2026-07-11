@@ -2,6 +2,7 @@
 """Usage tracking for billing and rate limiting (MongoDB)."""
 
 from datetime import datetime
+from typing import Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field

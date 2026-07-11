@@ -1,6 +1,7 @@
 # src/config/settings.py
 """Centralized configuration using pydantic-settings."""
 
+import secrets
 from functools import lru_cache
 from typing import Optional
 
@@ -36,7 +37,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379"
 
     # ── Auth ──
-    JWT_SECRET: str = "change-me-in-production-use-openssl-rand-hex-32"
+    JWT_SECRET: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    ANTHROPIC_API_KEY: str = ""
 
     # ── Vector Store ──
     VECTOR_STORE_PATH: str = "data/vectorstore"
@@ -67,7 +69,21 @@ class Settings(BaseSettings):
         return self.ENVIRONMENT == "production"
 
 
+def _validate_settings(settings: Settings) -> None:
+    """Validate critical settings at startup."""
+    if not settings.JWT_SECRET:
+        if settings.is_production:
+            raise RuntimeError(
+                "JWT_SECRET must be set in production. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        # In dev, auto-generate an ephemeral secret (session only)
+        settings.JWT_SECRET = secrets.token_hex(32)
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Cached settings instance."""
-    return Settings()
+    settings = Settings()
+    _validate_settings(settings)
+    return settings

@@ -1,22 +1,24 @@
-# Render Backend Deployment Configuration
+# Render Deployment Configuration
 # https://render.com/docs/deploy-fastapi
+# https://render.com/docs/blueprint-spec
 #
 # How to use:
 # 1. Push your code to a GitHub repository
 # 2. In Render Dashboard, click "New +" → "Blueprint"
 # 3. Connect your GitHub repo
 # 4. Render will auto-detect this render.yaml file
-# 5. Set the GROQ_API_KEY as an environment secret (free at https://console.groq.com)
+# 5. Set GROQ_API_KEY and JWT_SECRET as environment secrets
 
 services:
   - type: web
     name: al-ilm-islamic-rag-api
-    env: python
+    env: docker
     plan: free
     region: oregon
-    buildCommand: bash render-build.sh
+    buildCommand: echo "Building Docker image..."
     startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
+    autoDeploy: false
     envVars:
       - key: LLM_PROVIDER
         value: groq
@@ -24,7 +26,40 @@ services:
         value: llama-3.1-8b-instant
       - key: GROQ_API_KEY
         sync: false
+      - key: JWT_SECRET
+        sync: false
       - key: PYTHON_VERSION
         value: 3.11
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: MONGODB_URL
+        fromService:
+          type: pserv
+          name: mongodb
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: redis
+          property: connectionString
+      - key: VECTOR_STORE_PATH
+        value: /app/data/vectorstore
+      - key: ENVIRONMENT
+        value: production
+
+  - type: pserv
+    name: mongodb
+    env: docker
+    plan: free
+    region: oregon
+    disk:
+      name: mongo-data
+      mountPath: /data/db
+      sizeGB: 1
+
+  - type: redis
+    name: redis
+    plan: free
+    region: oregon
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
