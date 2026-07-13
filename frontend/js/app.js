@@ -5,7 +5,7 @@
 ═══════════════════════════════════════════════ */
 
 /* ── Config ── */
-const API_BASE   = (window.__API_BASE__) || '';
+const API_BASE = 'https://islamic-rag-system.onrender.com' || '';
 const WS_URL     = API_BASE
   ? API_BASE.replace(/^http/, 'ws') + '/ws/ask'
   : ((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/ask');
