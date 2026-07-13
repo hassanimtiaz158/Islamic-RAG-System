@@ -89,10 +89,7 @@ islamic-rag-system/
 ├── scripts/            # index_all, load_quran/hadiths/tafsir/fiqh, evaluate
 ├── frontend/           # Vanilla JS SPA (js/, css/, index.html, admin.html)
 ├── data/               # quran, hadith, tafsir, fiqh (PDFs), seerah, vectorstore
-├── dockerfile          # multi-stage production image
-├── docker-compose.yml  # local dev (app + mongo + redis)
-├── render.yaml         # Render Blueprint (Docker)
-└── runtime.txt         # Python 3.11 pin (non-Docker deploy)
+└── requirements.txt    # Python dependencies
 ```
 
 ---
@@ -175,35 +172,40 @@ python scripts/index_all.py     # full pipeline: quran, hadith×6, tafsir, fiqh,
 
 ---
 
-## 🌐 Deployment
+## 🌐 Deployment (manual)
 
-### Render (non-Docker, recommended)
-1. Push to GitHub → Render **New + → Web Service**.
-2. **Language:** Python 3 (uses `runtime.txt` → 3.11).
+This project is deployed manually — no Dockerfile, `render.yaml`, or CI is committed.
+
+### Render (backend + API)
+1. Push to GitHub → Render **New + → Web Service** → connect the repo.
+2. **Language:** Python 3.
 3. **Build Command:** `pip install -r requirements.txt`
 4. **Start Command:** `uvicorn src.api.main:app --host 0.0.0.0 --port $PORT`
 5. **Health Check Path:** `/api/health`
-6. Set env vars: `GROQ_API_KEY`, `JWT_SECRET`, `LLM_PROVIDER`, `LLM_MODEL`, `ENVIRONMENT=production`, `PYTHONUNBUFFERED=1`, `VECTOR_STORE_PATH`.
-7. *(Optional)* Attach a **Disk** at `VECTOR_STORE_PATH` and run `python scripts/index_all.py` once for real answers.
+6. **Environment** → add:
+   - `GROQ_API_KEY` (or `OPENAI_API_KEY`)
+   - `JWT_SECRET` (random string)
+   - `LLM_PROVIDER=groq`, `LLM_MODEL=llama-3.1-8b-instant`
+   - `ENVIRONMENT=production`, `PYTHONUNBUFFERED=1`
+   - `VECTOR_STORE_PATH=/app/data/vectorstore` (or your disk mount)
+   - If serving the frontend separately (Vercel): `ALLOWED_ORIGINS=https://<app>.vercel.app,https://<app>.onrender.com`
+7. **Deploy.** The backend serves the UI from `frontend/` same-origin, so no CORS is needed unless you host the frontend elsewhere.
+8. *(Optional)* Attach a **Disk** at `VECTOR_STORE_PATH` and run `python scripts/index_all.py` once for real (non-demo) answers.
 
-> The embedding model (~400 MB) downloads on first request and is cached. The frontend is served
-> same-origin — no CORS config needed.
-
-### Docker
-```bash
-docker build -t islamic-rag .
-docker run -p 8000:8000 islamic-rag
-```
-The image pre-bakes the embedding model and bundles the frontend. See `render.yaml` for a
-Blueprint deploy.
+> The embedding model (~400 MB) downloads on the first request and is then cached.
 
 ### Vercel (frontend only, optional)
-Deploy `frontend/` as a static site (Root Directory `frontend`, no build). Point the API at Render:
-```js
-// frontend/js/app.js — line 8
-const API_BASE = 'https://<your-app>.onrender.com' || '';
-```
-Then add the Vercel URL to Render's `ALLOWED_ORIGINS`.
+1. Vercel **Add New → Project** → import the repo.
+2. **Framework Preset:** Other · **Root Directory:** `frontend` · **Build Command:** *(none)* · **Output Directory:** `frontend`.
+3. Point the API at your Render backend (`frontend/js/app.js` line 8):
+   ```js
+   const API_BASE = 'https://<your-app>.onrender.com' || '';
+   ```
+4. Add a `vercel.json` in `frontend/` for SPA deep links:
+   ```json
+   { "rewrites": [ { "source": "/(.*)", "destination": "/index.html" } ] }
+   ```
+5. Make sure Render's `ALLOWED_ORIGINS` includes the Vercel URL (step 6 above).
 
 ---
 
