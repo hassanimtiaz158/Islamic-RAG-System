@@ -9,9 +9,9 @@ import chromadb
 from chromadb.config import Settings
 
 try:
-    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_community.embeddings import FastEmbedEmbeddings
 except ImportError:
-    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_huggingface import FastEmbedEmbeddings
 
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
@@ -51,13 +51,13 @@ class IslamicVectorStore:
     def __init__(self, persist_directory: str = "data/vectorstore") -> None:
         self.persist_directory = Path(persist_directory)
 
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={
-                "normalize_embeddings": True,
-                "batch_size": 64,
-            },
+        # Lightweight ONNX embedding backend (fastembed) instead of
+        # sentence-transformers/PyTorch — keeps RAM low enough for Render's
+        # 512 MB free tier. Same model, so index+query stay consistent.
+        self.embeddings = FastEmbedEmbeddings(
+            model_name="all-MiniLM-L6-v2",
+            normalize_embeddings=True,
+            batch_size=64,
         )
 
         self.client = chromadb.PersistentClient(

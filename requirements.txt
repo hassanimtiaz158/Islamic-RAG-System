@@ -38,7 +38,7 @@ langsmith>=0.0.70
 
 # ── Vector Store ──
 chromadb>=0.4.22
-sentence-transformers>=2.2.2
+fastembed>=0.3.0
 
 # ── Document Processing ──
 pymupdf>=1.23.0

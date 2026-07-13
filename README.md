@@ -60,7 +60,7 @@ An 11-step stateful **LangGraph** workflow:
 ```
 
 ### Vector Store (`src/core/islamic_vectorDB.py`)
-- **ChromaDB** persistent client, embedding model `sentence-transformers/all-MiniLM-L6-v2` (CPU, normalized).
+- **ChromaDB** persistent client, embedding model `all-MiniLM-L6-v2` served via **fastembed (ONNX)** — no PyTorch, so it runs within Render's 512 MB free tier.
 - **10 collections:** `quran`, `hadith_bukhari`, `hadith_muslim`, `hadith_dawud`,
   `hadith_tirmidhi`, `hadith_nasai`, `hadith_ibnmajah`, `tafsir`, `fiqh`, `seerah`, plus `user_uploaded`.
 - Thread-safe embedding via a global `EMBED_LOCK`.
