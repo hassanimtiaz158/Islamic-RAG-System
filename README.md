@@ -189,8 +189,9 @@ This project is deployed manually — no Dockerfile, `render.yaml`, or CI is com
    - `ENVIRONMENT=production`, `PYTHONUNBUFFERED=1`
    - `VECTOR_STORE_PATH=/app/data/vectorstore` (or your disk mount)
    - If serving the frontend separately (Vercel): `ALLOWED_ORIGINS=https://<app>.vercel.app,https://<app>.onrender.com`
-7. **Deploy.** The backend serves the UI from `frontend/` same-origin, so no CORS is needed unless you host the frontend elsewhere.
-8. *(Optional)* Attach a **Disk** at `VECTOR_STORE_PATH` and run `python scripts/index_all.py` once for real (non-demo) answers.
+7. **Start Command:** `bash start.sh` (starts the API and indexes the store only when empty).
+8. **Deploy.** The backend serves the UI from `frontend/` same-origin. On first start it indexes in the background (demo answers until done); later cold starts skip indexing thanks to a `.indexed` marker.
+9. *(Recommended)* Attach a **Disk** at `VECTOR_STORE_PATH` so the indexed data and marker persist across restarts. Without a disk, the free plan re-indexes on every cold start.
 
 > The embedding model (~400 MB) downloads on the first request and is then cached.
 
