@@ -55,7 +55,7 @@ class IslamicVectorStore:
         # sentence-transformers/PyTorch — keeps RAM low enough for Render's
         # 512 MB free tier. Same model, so index+query stay consistent.
         self.embeddings = FastEmbedEmbeddings(
-            model_name="all-MiniLM-L6-v2",
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
             normalize_embeddings=True,
             batch_size=64,
         )

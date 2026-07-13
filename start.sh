@@ -4,7 +4,7 @@
 # via a .indexed marker file. Designed for Render free tier (no Shell access).
 set -e
 
-STORE_PATH="${VECTOR_STORE_PATH:-/app/data/vectorstore}"
+STORE_PATH="${VECTOR_STORE_PATH:-data/vectorstore}"
 MARKER="$STORE_PATH/.indexed"
 
 # Start the API in the background so the service binds the port and passes
