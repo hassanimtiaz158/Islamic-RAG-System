@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_DEFAULT_RPM: int = 60  # requests per minute
 
+    # ── API Keys (lightweight gate for the public main.py endpoints) ──
+    # PUBLIC_API_KEY: if set, /api/ask and /ws/ask require it via X-API-Key.
+    # ADMIN_API_KEY: required for /api/index-document; endpoint is disabled if unset.
+    PUBLIC_API_KEY: str = ""
+    ADMIN_API_KEY: str = ""
+
     # ── Billing ──
     BILLING_ENABLED: bool = False
 

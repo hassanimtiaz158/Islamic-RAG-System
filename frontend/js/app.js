@@ -5,7 +5,12 @@
 ═══════════════════════════════════════════════ */
 
 /* ── Config ── */
-const API_BASE = 'https://islamic-rag-system.onrender.com' || '';
+// Override by injecting `window.__API_BASE__` (e.g. '' for same-origin) via a
+// <script> tag before this file loads — otherwise defaults to the maintainer's
+// hosted backend, matching the current deployed site's behavior.
+const API_BASE = (typeof window.__API_BASE__ === 'string') ? window.__API_BASE__ : 'https://islamic-rag-system.onrender.com';
+// Optional shared key sent as X-API-Key when the backend has PUBLIC_API_KEY configured.
+const PUBLIC_API_KEY = window.__PUBLIC_API_KEY__ || '';
 const WS_URL     = API_BASE
   ? API_BASE.replace(/^http/, 'ws') + '/ws/ask'
   : ((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws/ask');
@@ -390,6 +395,7 @@ async function sendQuery() {
         language: currentLang,
         sources,
         conversation_id: currentConversationId || '',
+        key: PUBLIC_API_KEY,
       }));
       return;
     } catch (e) {
@@ -408,7 +414,10 @@ async function sendQuery() {
 
     const res = await fetch(`${API_BASE}/api/ask`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        PUBLIC_API_KEY ? { 'X-API-Key': PUBLIC_API_KEY } : {}
+      ),
       body: JSON.stringify({ query, language: currentLang, sources, conversation_id: currentConversationId || '' }),
       signal: controller.signal,
     });
@@ -814,7 +823,9 @@ function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function setStatus(type, text) {

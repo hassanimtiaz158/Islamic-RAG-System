@@ -8,7 +8,10 @@ installed (the dependency is only required when a v1 endpoint is actually hit).
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from src.config.settings import get_settings
 

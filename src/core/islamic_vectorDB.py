@@ -97,9 +97,10 @@ class IslamicVectorStore:
 
         for i in range(0, total_docs, batch_size):
             batch = documents[i : i + batch_size]
-            store.add_documents(batch)
+            with EMBED_LOCK:
+                store.add_documents(batch)
             indexed = min(i + batch_size, total_docs)
-            print(f"[{collection_name}] Indexed {indexed}/{total_docs} documents")
+            logger.info(f"[{collection_name}] Indexed {indexed}/{total_docs} documents")
 
     def retrieve_with_scores(
         self,
@@ -181,8 +182,9 @@ class IslamicVectorStore:
     def _resolve_collection(self, collection_name: str) -> str:
         """Resolve the collection name to use.
 
-        Shared collections (quran, hadith_*, tafsir, fiqh, seerah) are global.
-        User uploads and custom collections are tenant-scoped.
+        Currently a no-op: all collections (including "user_uploaded") are
+        global/shared, not tenant-scoped. There is no multi-tenant isolation
+        in this deployment.
         """
         return collection_name
 

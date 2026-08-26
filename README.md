@@ -137,9 +137,12 @@ Open **http://localhost:8000** — the chat UI is served directly by the backend
 | `OLLAMA_BASE_URL` | Ollama endpoint | `http://localhost:11434` |
 | `HADITH_API_KEY` / `QURAN_API_KEY` | required for indexing | — |
 | `MONGODB_URL` / `REDIS_URL` | auth & cache (optional) | — |
-| `JWT_SECRET` | auth signing secret | — |
+| `JWT_SECRET` | auth signing secret (only used by the unwired `/v1` SaaS API) | — |
 | `VECTOR_STORE_PATH` | ChromaDB persistence dir | `data/vectorstore` |
 | `ALLOWED_ORIGINS` | CORS origins (comma-separated) | `localhost` only |
+| `PUBLIC_API_KEY` | if set, `/api/ask` and `/ws/ask` require it (`X-API-Key` header / WS `key` field) — lightweight anti-abuse gate, not full auth | — (open) |
+| `ADMIN_API_KEY` | required to use `/api/index-document`; the endpoint is disabled (503) if unset | — (disabled) |
+| `RATE_LIMIT_ENABLED` / `RATE_LIMIT_DEFAULT_RPM` | per-IP request rate limit on the main endpoints | `true` / `60` |
 
 ---
 
@@ -174,7 +177,7 @@ python scripts/index_all.py     # full pipeline: quran, hadith×6, tafsir, fiqh,
 
 ## 🌐 Deployment (manual)
 
-This project is deployed manually — no Dockerfile, `render.yaml`, or CI is committed.
+This project is deployed manually — no `render.yaml` or CI is committed. A `Dockerfile` is available for containerized hosts (see [Docker](#-docker) below); Render itself is currently configured to build natively from `requirements.txt` (steps below), not from the Dockerfile.
 
 ### Render (backend + API)
 1. Push to GitHub → Render **New + → Web Service** → connect the repo.
@@ -198,15 +201,25 @@ This project is deployed manually — no Dockerfile, `render.yaml`, or CI is com
 ### Vercel (frontend only, optional)
 1. Vercel **Add New → Project** → import the repo.
 2. **Framework Preset:** Other · **Root Directory:** `frontend` · **Build Command:** *(none)* · **Output Directory:** `frontend`.
-3. Point the API at your Render backend (`frontend/js/app.js` line 8):
-   ```js
-   const API_BASE = 'https://<your-app>.onrender.com' || '';
+3. Point the API at your backend by injecting a config override before `app.js` loads (in `frontend/index.html`), rather than editing `app.js` directly:
+   ```html
+   <script>window.__API_BASE__ = 'https://<your-app>.onrender.com';</script>
+   <script src="js/app.js"></script>
    ```
+   Use `window.__API_BASE__ = ''` for same-origin (when frontend and backend are served together). If `PUBLIC_API_KEY` is configured on the backend (see [Configuration](#%EF%B8%8F-configuration-env)), also set `window.__PUBLIC_API_KEY__` there.
 4. Add a `vercel.json` in `frontend/` for SPA deep links:
    ```json
    { "rewrites": [ { "source": "/(.*)", "destination": "/index.html" } ] }
    ```
 5. Make sure Render's `ALLOWED_ORIGINS` includes the Vercel URL (step 6 above).
+
+### Docker
+A `Dockerfile` is provided for any container host (self-managed VM, Fly.io, ECS, etc.):
+```bash
+docker build -t islamic-rag .
+docker run -p 8000:8000 --env-file .env islamic-rag
+```
+It pre-fetches the embedding model at build time, runs as a non-root user, and reuses `start.sh` as its entrypoint (same first-boot indexing behavior as a native deploy). Mount `-v $(pwd)/data/vectorstore:/app/data/vectorstore` to persist the index across container restarts.
 
 ---
 

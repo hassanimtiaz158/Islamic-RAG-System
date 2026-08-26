@@ -210,7 +210,9 @@ def verify_answer_grounding(
             unsupported.append(f"Citation not found in retrieved sources: {cite_text}")
 
     # 3. Check for unsupported factual claims (sentences without citations)
-    sentences = re.split(r'(?<=[.!?])\s+', response)
+    # Don't split on a period that's part of a verse/hadith number (e.g. "2:153.")
+    # so a citation like [Quran Al-Baqarah 2:153] doesn't fragment its own sentence.
+    sentences = re.split(r'(?<!\d\.)(?<=[.!?])\s+', response)
     uncited_claims = []
     for sentence in sentences:
         sentence = sentence.strip()
@@ -494,14 +496,16 @@ def cross_reference_citations(
                 verdict["reason"] = "Tafsir reference not found in context"
 
         else:
-            # Unknown source — mark as unverified but not penalize heavily
-            verdict["verified"] = True
-            verdict["reason"] = "Unknown source type — skipped verification"
-            verified_count += 1
+            # Unknown source — can't be checked either way. Excluded from the
+            # hallucination ratio entirely rather than counted as verified,
+            # so malformed/unparseable citations can't inflate trust.
+            verdict["verified"] = False
+            verdict["reason"] = "Unknown source type — could not be verified"
+            verdict["unverifiable"] = True
 
         verdicts.append(verdict)
 
-    total = len(verdicts)
+    total = sum(1 for v in verdicts if not v.get("unverifiable"))
     hallucination_ratio = 1.0 - (verified_count / total) if total > 0 else 0.0
     fact_check_passed = hallucination_ratio < 0.5
 

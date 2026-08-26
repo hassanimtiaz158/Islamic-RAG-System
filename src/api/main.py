@@ -6,6 +6,7 @@ SaaS Edition: multi-tenant, auth-ready, Redis-cached.
 """
 
 import asyncio
+import hmac
 import os
 import threading
 import logging
@@ -13,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -36,9 +37,48 @@ _llm_settings = _get_settings()
 LLM_PROVIDER = _llm_settings.LLM_PROVIDER
 LLM_MODEL = _llm_settings.LLM_MODEL
 
+# ── API keys (lightweight anti-abuse gate — not a full auth system) ──
+# PUBLIC_API_KEY: if set, /api/ask and /ws/ask require it. Unset = endpoints stay open.
+# ADMIN_API_KEY: required for /api/index-document. Unset = uploads are disabled (503).
+PUBLIC_API_KEY = _llm_settings.PUBLIC_API_KEY
+ADMIN_API_KEY = _llm_settings.ADMIN_API_KEY
+
+
+def _check_api_key(provided: Optional[str], expected: str) -> bool:
+    """Constant-time comparison. Returns True if `expected` is unset (key not required)."""
+    if not expected:
+        return True
+    if not provided:
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
 # ── CORS: allowed origins from env (comma-separated), default to localhost only ──
 _allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:8000")
 ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins.split(",") if o.strip()]
+
+# ── Rate limiting (per-IP sliding window, in-memory) ──
+_RATE_LOCK = threading.Lock()
+_rate_buckets: dict = {}  # {ip: [timestamps]}
+_RATE_WINDOW = 60  # seconds
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit_ok(ip: str) -> bool:
+    if not _llm_settings.RATE_LIMIT_ENABLED:
+        return True
+    now = time.time()
+    with _RATE_LOCK:
+        timestamps = [t for t in _rate_buckets.get(ip, []) if now - t < _RATE_WINDOW]
+        if len(timestamps) >= _llm_settings.RATE_LIMIT_DEFAULT_RPM:
+            _rate_buckets[ip] = timestamps
+            return False
+        timestamps.append(now)
+        _rate_buckets[ip] = timestamps
+        return True
 
 # ── Response cache (simple in-memory) ──
 _response_cache: dict = {}
@@ -399,11 +439,16 @@ async def health_check():
 
 
 @app.post("/api/ask", response_model=QueryResponse)
-async def ask_islamic(req: QueryRequest):
+async def ask_islamic(req: QueryRequest, request: Request, x_api_key: Optional[str] = Header(default=None)):
     """
     Main chat endpoint.
     Uses the RAG pipeline if available, otherwise falls back to curated knowledge.
     """
+    if not _check_api_key(x_api_key, PUBLIC_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    if not _rate_limit_ok(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
+
     _init_rag()
 
     # Check cache
@@ -516,8 +561,19 @@ def _sanitize_filename(filename: Optional[str]) -> str:
 
 
 @app.post("/api/index-document")
-async def index_document(file: UploadFile = File(...)):
-    """Upload and index an Islamic text document (PDF or TXT)."""
+async def index_document(
+    request: Request,
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(default=None),
+):
+    """Upload and index an Islamic text document (PDF or TXT). Admin-only."""
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=503, detail="Document upload is disabled (ADMIN_API_KEY not configured).")
+    if not _check_api_key(x_api_key, ADMIN_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing admin API key.")
+    if not _rate_limit_ok(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
+
     _init_rag()
     if vector_store is None:
         raise HTTPException(
@@ -620,8 +676,15 @@ AYAH_LIMITS = {
 
 
 @app.get("/api/verify-citation")
-async def verify_citation(surah: int = Query(..., ge=1, le=114), ayah: int = Query(..., ge=1, le=286)):
+async def verify_citation(
+    request: Request,
+    surah: int = Query(..., ge=1, le=114),
+    ayah: int = Query(..., ge=1, le=286),
+):
     """Verify a Quran citation and return Arabic + English text."""
+    if not _rate_limit_ok(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
+
     max_ayahs = AYAH_LIMITS.get(surah, 286)
     if ayah > max_ayahs:
         return {"verified": False, "error": f"Surah {surah} has only {max_ayahs} ayahs"}
@@ -672,8 +735,10 @@ class TranslateVerseRequest(BaseModel):
 
 
 @app.post("/api/translate-verse")
-async def translate_verse(req: TranslateVerseRequest):
+async def translate_verse(req: TranslateVerseRequest, request: Request):
     """Translate verse text to Urdu or Arabic using the LLM."""
+    if not _rate_limit_ok(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
     if not req.text or req.target_lang not in ("ur", "ar"):
         return {"translated": req.text}
 
@@ -705,10 +770,11 @@ async def ws_ask(ws: WebSocket):
 
     # Rate limiting state
     _msg_timestamps: list = []
+    ip = ws.client.host if ws.client else "unknown"
 
     try:
         while True:
-            # Enforce rate limit
+            # Enforce per-connection rate limit
             now = time.time()
             _msg_timestamps = [t for t in _msg_timestamps if now - t < _WS_RATE_WINDOW]
             if len(_msg_timestamps) >= _WS_RATE_LIMIT:
@@ -720,7 +786,19 @@ async def ws_ask(ws: WebSocket):
                 break
             _msg_timestamps.append(now)
 
+            # Enforce per-IP rate limit (catches abuse via many concurrent connections)
+            if not _rate_limit_ok(ip):
+                await ws.send_json({"type": "error", "message": "Rate limit exceeded. Please slow down."})
+                await ws.close()
+                break
+
             data = await ws.receive_json()
+
+            if not _check_api_key(data.get("key"), PUBLIC_API_KEY):
+                await ws.send_json({"type": "error", "message": "Invalid or missing API key."})
+                await ws.close()
+                break
+
             query = data.get("query", "")
             language = data.get("language", "en")
 

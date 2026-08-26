@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from src.auth.api_keys import hash_api_key
 from src.auth.jwt import decode_token

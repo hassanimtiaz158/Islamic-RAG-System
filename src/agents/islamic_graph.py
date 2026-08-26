@@ -277,7 +277,9 @@ LANGUAGE INSTRUCTION — ARABIC
 - Keep Quran verses in their original Arabic text
 - Keep Hadith references in their original Arabic text with translation
 - Use Arabic punctuation: ، for commas, ؛ for semicolons, ۔ for periods
-- Maintain citation format in brackets: [القرآن ...], [البخاري ...], [مسلم ...]
+- CITATION BRACKETS STAY IN ENGLISH regardless of response language — do NOT
+  translate or transliterate them. Use exactly the same format as shown in the
+  CITATION RULES section above, e.g. [Quran Al-Baqarah 2:153], [Bukhari 1469].
 """,
     "ur": """
 ═══════════════════════════════════════
@@ -287,7 +289,9 @@ LANGUAGE INSTRUCTION — URDU
 - Use Nastaliq-style Urdu script for all text
 - Keep Quran verses in their original Arabic script (with Urdu translation in parentheses if needed)
 - Keep Hadith text in Arabic with Urdu explanation
-- Maintain citation format in brackets: [قرآن ...], [بخاری ...], [مسلم ...]
+- CITATION BRACKETS STAY IN ENGLISH regardless of response language — do NOT
+  translate or transliterate them. Use exactly the same format as shown in the
+  CITATION RULES section above, e.g. [Quran Al-Baqarah 2:153], [Bukhari 1469].
 - Use Urdu punctuation: ، for commas, ۔ for periods
 """,
 }

@@ -55,4 +55,4 @@ class IslamicAgentState(TypedDict):
     # ── Flow control ──
     iteration: int
     insufficient_evidence: bool      # True when retrieval found nothing relevant
-    include_followups: bool = False  # If True, runs suggest_followups LLM call (adds latency)
+    include_followups: bool          # If True, runs suggest_followups LLM call (adds latency); default False via .get()

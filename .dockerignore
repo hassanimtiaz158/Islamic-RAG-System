@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dvc
+venv
+__pycache__
+*.pyc
+.env
+.env.local
+*.log
+data/vectorstore
+S3
+pydevkit
+.pytest_cache

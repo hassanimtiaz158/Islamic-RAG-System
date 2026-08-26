@@ -28,6 +28,16 @@ const CITATION_PATTERNS = [
 const ICON_MAP  = { quran: '📖', hadith: '📜', tafsir: '🔍' };
 const LABEL_MAP = { quran: 'Quran', hadith: 'Hadith', tafsir: 'Tafsir' };
 
+/** Escape text for safe insertion into innerHTML. */
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /** Cache for Quran API lookups */
 const verseCache = {};
 
@@ -160,9 +170,9 @@ function buildVerseDisplay(citations) {
   if (cached) {
     return `
       <div class="verse-display">
-        <div class="verse-arabic">${cached.arabic}</div>
-        <div class="verse-transliteration">${cached.transliteration || ''}</div>
-        <div class="verse-ref">${quranCite.ref || quranCite.raw}</div>
+        <div class="verse-arabic">${escapeHtml(cached.arabic)}</div>
+        <div class="verse-transliteration">${escapeHtml(cached.transliteration || '')}</div>
+        <div class="verse-ref">${escapeHtml(quranCite.ref || quranCite.raw)}</div>
       </div>
     `;
   }
@@ -171,7 +181,7 @@ function buildVerseDisplay(citations) {
   return `
     <div class="verse-display verse-loading" data-surah="${surah}" data-ayah="${ayah}">
       <div class="verse-arabic" style="opacity:0.4">Loading verse…</div>
-      <div class="verse-ref">${quranCite.ref || quranCite.raw}</div>
+      <div class="verse-ref">${escapeHtml(quranCite.ref || quranCite.raw)}</div>
     </div>
   `;
 }
@@ -335,18 +345,18 @@ function renderTripletCard(surah, ayah, arabic, english, urdu, ref, isReady) {
       <div class="verse-triplet" style="${!isReady ? 'opacity:0.5;' : ''}">
         <div class="verse-col verse-col-arabic" dir="rtl">
           <div class="verse-lang-label">العربية</div>
-          <div class="verse-text verse-arabic-text">${arabic || 'جاري التحميل…'}</div>
+          <div class="verse-text verse-arabic-text">${arabic ? escapeHtml(arabic) : 'جاري التحميل…'}</div>
         </div>
         <div class="verse-col verse-col-english">
           <div class="verse-lang-label">English</div>
-          <div class="verse-text verse-english-text">${english || 'Loading…'}</div>
+          <div class="verse-text verse-english-text">${english ? escapeHtml(english) : 'Loading…'}</div>
         </div>
         <div class="verse-col verse-col-urdu" dir="rtl">
           <div class="verse-lang-label">اردو</div>
-          <div class="verse-text verse-urdu-text">${urdu || 'لوڈ ہو رہا ہے…'}</div>
+          <div class="verse-text verse-urdu-text">${urdu ? escapeHtml(urdu) : 'لوڈ ہو رہا ہے…'}</div>
         </div>
       </div>
-      <div class="verse-triplet-ref">${ref.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+      <div class="verse-triplet-ref">${escapeHtml(ref)}</div>
     </div>
   `;
 }
@@ -405,9 +415,9 @@ function renderCitationCards(citations) {
         <span class="card-source-label ${c.type}">${LABEL_MAP[c.type] || 'Source'}</span>
         ${verifiedEl}
       </div>
-      <div class="card-reference">${(c.ref || c.raw).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
-      <div class="card-raw">${c.raw.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
-      <a class="card-link" href="${c.url}" target="_blank" rel="noopener">View Source</a>
+      <div class="card-reference">${escapeHtml(c.ref || c.raw)}</div>
+      <div class="card-raw">${escapeHtml(c.raw)}</div>
+      <a class="card-link" href="${escapeHtml(c.url)}" target="_blank" rel="noopener">View Source</a>
     `;
 
     list.appendChild(card);
@@ -447,15 +457,16 @@ function renderCitationCards(citations) {
  */
 async function verifyQuranCitation(surah, ayah) {
   try {
-    const base = window.__API_BASE__ || '';
-    const res  = await fetch(`${base}/api/verify-citation?q=${surah}:${ayah}`);
+    const base = (typeof API_BASE !== 'undefined' ? API_BASE : (window.__API_BASE__ || ''));
+    const res  = await fetch(`${base}/api/verify-citation?surah=${surah}&ayah=${ayah}`);
     if (!res.ok) return { verified: false };
     const data = await res.json();
     if (data && data.verified) {
       return {
         verified:  true,
-        text:      data.text,
-        surahName: data.surahName,
+        arabic:    data.arabic,
+        english:   data.english,
+        surahName: data.surah,
       };
     }
     return { verified: false };
